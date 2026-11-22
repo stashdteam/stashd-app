@@ -41,7 +41,7 @@
   var CFG = window.STASHD_CONFIG || {};
   var CLOUD = !!(CFG.supabaseUrl && CFG.supabaseKey);
   var sb = null;
-  var COLS = ['id', 'user_id', 'board_id', 'url', 'title', 'brand', 'image_url', 'price', 'was_price', 'currency', 'size', 'sizes', 'note', 'sold_out', 'bought', 'created_at'];
+  var COLS = ['id', 'user_id', 'board_id', 'url', 'title', 'brand', 'image_url', 'price', 'was_price', 'currency', 'size', 'sizes', 'note', 'sold_out', 'bought', 'in_budget', 'created_at'];
   function row(it) { var r = {}; COLS.forEach(function (k) { if (it[k] !== undefined) r[k] = it[k]; }); return r; }
   function base() { return location.origin + location.pathname.replace(/index\.html$/, ''); }
   function syncFail(e) { if (window.console) console.error(e); toast("Couldn't sync. " + ((e && e.message) || 'Check your connection.')); return false; }
@@ -51,7 +51,7 @@
     saveItem: function (it) { clearTimeout(saveTimers[it.id]); return CLOUD ? sb.from('items').upsert(row(it)).then(done, syncFail) : Promise.resolve(persist()); },
     saveItemSoon: function (it) { clearTimeout(saveTimers[it.id]); if (!CLOUD) return persist(); saveTimers[it.id] = setTimeout(function () { api.saveItem(it); }, 600); },
     deleteItem: function (id) { clearTimeout(saveTimers[id]); return CLOUD ? sb.from('items').delete().eq('id', id).then(done, syncFail) : Promise.resolve(persist()); },
-    saveBoard: function (b) { return CLOUD ? sb.from('boards').upsert({ id: b.id, user_id: b.user_id, name: b.name, created_at: b.created_at, visibility: b.visibility || 'private', link_token: b.link_token || null }).then(done, syncFail) : Promise.resolve(persist()); },
+    saveBoard: function (b) { return CLOUD ? sb.from('boards').upsert({ id: b.id, user_id: b.user_id, name: b.name, created_at: b.created_at, visibility: b.visibility || 'private', link_token: b.link_token || null, in_budget: b.in_budget !== false }).then(done, syncFail) : Promise.resolve(persist()); },
     deleteBoard: function (id) { return CLOUD ? sb.from('boards').delete().eq('id', id).then(done, syncFail) : Promise.resolve(persist()); },
     saveProfile: function () {
       if (!CLOUD) { saveUser(); return Promise.resolve(true); }
@@ -173,6 +173,7 @@
   function renderAuth(mode, note, prefill) {
     mode = mode || (!CLOUD && Object.keys(load(KEY.users, {})).length ? 'signin' : 'signup');
     var up = mode === 'signup', prov = providers();
+    document.body.classList.remove('tabs');
     document.title = 'Stashd · ' + (up ? 'Create account' : 'Sign in');
     app.innerHTML =
       '<main class="auth">' +
@@ -189,9 +190,7 @@
           (prov.indexOf('google') >= 0 ? '<button class="btn block google" type="button" data-oauth="google">' + GOOGLE_SVG + (up ? 'Sign up' : 'Sign in') + ' with Google</button>' : '') +
           '</div><p class="divider"><span>or with email</span></p>' : '') +
         '<form id="authForm" novalidate>' +
-          (up ? '<label class="field"><span>Name</span><input type="text" name="name" autocomplete="given-name" autocapitalize="words" maxlength="50" enterkeyhint="next" aria-describedby="nameErr" required><small class="ferr" id="nameErr"></small></label>' : '') +
-          (up && CLOUD ? '<label class="field"><span>Username</span><span class="at"><input type="text" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="20" enterkeyhint="next" aria-describedby="unErr unHelp" required></span>' +
-            '<small class="ferr" id="unErr"></small><small class="fok" id="unOk"></small><small class="help" id="unHelp">How friends find you. Letters, numbers, dots and underscores.</small></label>' : '') +
+          (up && !CLOUD ? '<label class="field"><span>Name</span><input type="text" name="name" autocomplete="given-name" autocapitalize="words" maxlength="50" enterkeyhint="next" aria-describedby="nameErr" required><small class="ferr" id="nameErr"></small></label>' : '') +
           '<label class="field"><span>Email</span><input type="email" name="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" maxlength="254" enterkeyhint="next" aria-describedby="emailErr" required value="' + esc(prefill || '') + '"><small class="ferr" id="emailErr"></small></label>' +
           '<label class="field"><span>Password</span><span class="pw"><input type="password" name="password" maxlength="72" autocomplete="' + (up ? 'new-password' : 'current-password') + '" enterkeyhint="go" aria-describedby="pwErr' + (up ? ' pwRules' : '') + '" required>' +
             '<button type="button" class="show" aria-label="Show password" aria-pressed="false">Show</button></span><small class="ferr" id="pwErr"></small></label>' +
@@ -216,18 +215,6 @@
     var form = document.getElementById('authForm'), err = document.getElementById('authErr');
     var f = { name: form.elements.name, email: form.elements.email, pw: form.elements.password };
     var touched = {};
-    var un = form.elements.username, unState = un ? bindUsername(un, document.getElementById('unErr'), document.getElementById('unOk')) : null, unEdited = false;
-    if (un) {
-      un.addEventListener('input', function () { unEdited = true; });
-      f.name.addEventListener('blur', function () {
-        setTimeout(function () {
-          var sug = suggestUsername(f.name.value);
-          if (unEdited || un.value || !sug) return;
-          if (document.activeElement === un) un.placeholder = sug;   // don't type into the box they're about to type in
-          else { un.value = sug; unState.check(); }
-        }, 0);
-      });
-    }
     function setErr(input, id, msg) {
       var el = document.getElementById(id);
       el.innerHTML = msg || '';
@@ -277,12 +264,11 @@
       e.preventDefault();
       touched = { name: true, email: true, pw: true };
       var btn0 = form.querySelector('[type=submit]');
-      var ok = [checkName(), unState ? await unState.check() : true, checkEmail('quiet'), checkPw()];
+      var ok = [checkName(), checkEmail('quiet'), checkPw()];
       if (ok.indexOf(false) >= 0) { var bad = form.querySelector('[aria-invalid=true]'); if (bad) bad.focus(); return; }
-      var username = un ? cleanUsername(un.value) : '';
       var email = f.email.value.trim().toLowerCase(), pw = f.pw.value, name = f.name ? f.name.value.trim().replace(/\s+/g, ' ') : '';
       var news = !!(form.elements.news && form.elements.news.checked);
-      if (CLOUD) return cloudAuth(up, name, email, pw, news, err, btn0, username);
+      if (CLOUD) return cloudAuth(up, name, email, pw, news, err, btn0);
       var users = load(KEY.users, {});
       if (up) {
         if (users[email]) return (err.textContent = 'There\'s already an account with that email on this device. Sign in instead.');
@@ -353,13 +339,13 @@
     return m || 'Something went wrong. Try again.';
   }
 
-  async function cloudAuth(up, name, email, pw, news, err, btn, username) {
+  async function cloudAuth(up, name, email, pw, news, err, btn) {
     btn.disabled = true; err.textContent = '';
     var label = btn.textContent; btn.textContent = up ? 'Creating account…' : 'Signing in…';
     var actions = document.getElementById('authActions');
     try {
       if (up) {
-        var r = await sb.auth.signUp({ email: email, password: pw, options: { data: { name: name, username: username || undefined, currency: 'EGP' }, emailRedirectTo: base() } });
+        var r = await sb.auth.signUp({ email: email, password: pw, options: { data: { currency: 'EGP' }, emailRedirectTo: base() } });
         if (r.error) { err.textContent = friendly(r.error); return; }
         // Supabase hides whether an email is taken: an existing account comes back with no identities.
         if (r.data.user && Array.isArray(r.data.user.identities) && r.data.user.identities.length === 0) {
@@ -373,7 +359,7 @@
           return;
         }
         if (news) subscribeBrevo(email);
-        if (r.data.session) return startCloud(r.data.session.user, 'Welcome to Stashd, ' + name + '!');
+        if (r.data.session) return startCloud(r.data.session.user, '');
         renderInbox(email, 'signup');
       } else {
         var s = await sb.auth.signInWithPassword({ email: email, password: pw });
@@ -398,7 +384,7 @@
     var md = au.user_metadata || {};
     user = { id: au.id, email: au.email, name: md.name || md.full_name || md.given_name || (au.email || '').split('@')[0], currency: md.currency || 'EGP' };
     app.innerHTML = '<p class="boot loading" style="justify-content:center">Loading your stash…</p>';
-    var BCOLS = 'id,user_id,name,visibility,link_token,created_at';
+    var BCOLS = 'id,user_id,name,visibility,link_token,in_budget,created_at';
     var res = await Promise.all([
       sb.from('boards').select(BCOLS).eq('user_id', au.id).order('created_at'),
       sb.from('profiles').select('username,name').eq('id', au.id).maybeSingle(),
@@ -493,99 +479,16 @@
     user = db = null; cache = {}; closeSheet(); history.replaceState(null, '', location.pathname); renderAuth('signin');
   }
   function saveUser() { var users = load(KEY.users, {}); users[user.email] = user; save(KEY.users, users); }
-  function newBoard(name, n) { return { id: uid(), user_id: user.id, name: name, visibility: 'private', link_token: null, created_at: new Date(Date.now() + (n || 0)).toISOString() }; }
+  function newBoard(name, n) { return { id: uid(), user_id: user.id, name: name, visibility: 'private', link_token: null, in_budget: true, created_at: new Date(Date.now() + (n || 0)).toISOString() }; }
 
   /* ---------- home ---------- */
-  function renderHome() {
-    document.title = 'Stashd';
-    if (ui.board !== 'all' && !boardName(ui.board)) ui.board = 'all';
-    var shBoard = CLOUD && sharedBoard(ui.board), ownIds = db.boards.map(function (b) { return b.id; });
-    if (shBoard && !cache[ui.board]) { cache[ui.board] = null; loadShared(ui.board); }
-    var inBoard = shBoard ? (cache[ui.board] || [])
-      : ui.board === 'all' ? db.items.filter(function (i) { return !i.board_id || ownIds.indexOf(i.board_id) >= 0; })
-      : db.items.filter(function (i) { return i.board_id === ui.board; });
-    var toBuy = inBoard.filter(function (i) { return !i.bought; }), bought = inBoard.filter(function (i) { return i.bought; });
-    var list = (ui.tab === 'bought' ? bought : toBuy).slice().sort(function (a, b) { return (b.created_at || '').localeCompare(a.created_at || ''); });
-
-    app.innerHTML =
-      '<div class="home">' +
-        '<header class="top"><h1 class="wm">Stash<span>d</span></h1><div class="actions">' +
-          '<button class="icon add" id="addBtn" type="button" aria-label="Add a link">+</button>' +
-          (CLOUD ? '<button class="icon me" id="peopleBtn" type="button" aria-label="Find people">' + PEOPLE_SVG + '</button>' : '') +
-          '<button class="icon me" id="meBtn" type="button" aria-label="Account and settings">' + esc((user.name || '?').charAt(0).toUpperCase()) + '</button>' +
-        '</div></header>' +
-        '<nav class="chips" aria-label="Boards">' +
-          '<button class="chip" type="button" data-board="all" aria-pressed="' + (ui.board === 'all') + '">All</button>' +
-          db.boards.map(function (b) { return '<button class="chip" type="button" data-board="' + esc(b.id) + '" aria-pressed="' + (ui.board === b.id) + '">' + (CLOUD && b.visibility !== 'public' ? LOCK + ' ' : '') + esc(b.name) + '</button>'; }).join('') +
-          (db.shared || []).map(function (b) { return '<button class="chip shared" type="button" title="Shared by @' + esc((b.owner && b.owner.username) || '') + '" data-board="' + esc(b.id) + '" aria-pressed="' + (ui.board === b.id) + '">' + PEOPLE_SVG.replace(/22/g, '14') + ' ' + esc(b.name) + '</button>'; }).join('') +
-          (ui.board !== 'all' ? '<button class="chip ghost" type="button" id="editBoard">' + (shBoard ? 'Board info' : CLOUD ? 'Board settings' : 'Edit board') + '</button>' : '') +
-          '<button class="chip ghost" type="button" id="newBoardBtn">+ Board</button>' +
-        '</nav>' +
-        '<div class="seg" role="tablist">' +
-          '<button type="button" role="tab" data-tab="tobuy" aria-selected="' + (ui.tab === 'tobuy') + '">To buy · ' + toBuy.length + '</button>' +
-          '<button type="button" role="tab" data-tab="bought" aria-selected="' + (ui.tab === 'bought') + '">Bought · ' + bought.length + '</button>' +
-        '</div>' +
-        (CLOUD && localStashes().length ? '<div class="hint" style="margin:0 0 1rem">You have items from the test version saved on this device. <div class="row" style="margin-top:.6rem"><button class="btn primary" type="button" id="importBtn">Move them to my account</button><button class="btn" type="button" id="importNo">No thanks</button></div></div>' : '') +
-        '<div class="sum"><span class="muted">' + (ui.tab === 'bought' ? 'Spent' : 'Left to spend') + '</span><strong>' + esc(totals(ui.tab === 'bought' ? bought : toBuy, user.currency)) + '</strong></div>' +
-        (shBoard ? '<p class="muted small" style="margin:-.4rem 0 .9rem">Shared by @' + esc((shBoard.owner && shBoard.owner.username) || '') + ' · ' + (shBoard.role === 'editor' ? 'you can add' : 'view only') + '</p>' : '') +
-        (shBoard && cache[ui.board] === null ? '<p class="loading muted">Loading…</p>' : list.length ? '<section class="grid">' + list.map(cardHtml).join('') + '</section>' : shBoard ? '<div class="empty"><p>Nothing here yet.</p></div>' : emptyHtml()) +
-      '</div>';
-
-    document.getElementById('addBtn').onclick = openAdd;
-    document.getElementById('meBtn').onclick = openMenu;
-    document.getElementById('newBoardBtn').onclick = function () { promptBoard(function (b) { ui.board = b.id; renderHome(); }); };
-    var eb = document.getElementById('editBoard');
-    if (eb) eb.onclick = function () { if (shBoard) return openBoardInfo(shBoard); if (!CLOUD) return openBoardEdit(); var b = db.boards.find(function (x) { return x.id === ui.board; }); if (b) openBoardSettings(b); };
-    var pb = document.getElementById('peopleBtn'); if (pb) pb.onclick = openPeople;
-    app.querySelectorAll('[data-board]').forEach(function (b) { b.onclick = function () { ui.board = b.dataset.board; renderHome(); }; });
-    app.querySelectorAll('[data-tab]').forEach(function (b) { b.onclick = function () { ui.tab = b.dataset.tab; renderHome(); }; });
-    app.querySelectorAll('.card').forEach(function (c) { c.onclick = function () { openItem(c.dataset.id); }; });
-    var es = document.getElementById('emptyAdd'); if (es) es.onclick = openAdd;
-    var ss = document.getElementById('emptySetup'); if (ss) ss.onclick = openSetup;
-    var ib = document.getElementById('importBtn'); if (ib) ib.onclick = function () { importLocal(ib); };
-    var inb = document.getElementById('importNo'); if (inb) inb.onclick = function () { save('stashd:imported', true); renderHome(); };
-  }
-
-  function emptyHtml() {
-    if (ui.tab === 'bought') return '<div class="empty"><h2>Nothing bought yet</h2><p>Open an item and tap Mark as bought. Treat yourself.</p></div>';
-    return '<div class="empty"><h2>Your stash is empty</h2><p>Paste a product link, or share one straight to Stashd from any app.</p>' +
-      '<button class="btn primary" id="emptyAdd" type="button">Add a link</button><br><button class="link" id="emptySetup" type="button">Set up Share to Stashd</button></div>';
-  }
-
   function tagsHtml(it, inline) {
     var p = pct(it), s = (it.sold_out ? '<span class="t sold">Sold out</span>' : '') + (p ? '<span class="t off">−' + p + '%</span>' : '');
     return s ? '<div class="tags' + (inline ? ' inline' : '') + '">' + s + '</div>' : '';
   }
   function letter(it) { return '<span class="letter" aria-hidden="true">' + esc((it.brand || it.title || '?').charAt(0).toUpperCase()) + '</span>'; }
 
-  function cardHtml(it) {
-    var img = safeImg(it.image_url);
-    var sub = [it.brand ? '<span class="brand">' + esc(it.brand) + '</span>' : '', it.price != null ? esc(money(it.price, it.currency)) : ''].filter(Boolean).join(' · ');
-    return '<button class="card" type="button" data-id="' + esc(it.id) + '">' +
-      '<div class="ph' + (img ? '' : ' none') + '">' + (img ? '<img src="' + esc(img) + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : letter(it)) + tagsHtml(it) + '</div>' +
-      '<div class="meta"><b>' + esc(it.title || 'Untitled item') + '</b>' + (sub ? '<small>' + sub + '</small>' : '') + '</div></button>';
-  }
-
   /* ---------- boards ---------- */
-  function promptBoard(done) {
-    var name = (window.prompt('Name your new board', '') || '').trim();
-    if (!name) return;
-    var b = newBoard(name.slice(0, 40)); db.boards.push(b); api.saveBoard(b); toast('Board "' + b.name + '" added');
-    done(b);
-  }
-  function openBoardEdit() {
-    var b = db.boards.find(function (x) { return x.id === ui.board; }); if (!b) return;
-    var s = sheet('<h2>Edit board</h2><label class="field"><span>Board name</span><input type="text" id="bName" maxlength="40" value="' + esc(b.name) + '"></label>' +
-      '<div class="stack"><button class="btn primary" id="bSave" type="button">Save</button><button class="btn danger" id="bDel" type="button">Delete board</button></div>' +
-      '<p class="muted" style="margin-top:.75rem;font-size:.875rem">Deleting a board keeps its items. They stay under All.</p>');
-    s.querySelector('#bSave').onclick = function () { var n = s.querySelector('#bName').value.trim(); if (n) { b.name = n.slice(0, 40); api.saveBoard(b); } closeSheet(); renderHome(); };
-    s.querySelector('#bDel').onclick = function () {
-      if (!confirm('Delete the board "' + b.name + '"? Its items stay in All.')) return;
-      db.boards = db.boards.filter(function (x) { return x.id !== b.id; });
-      db.items.forEach(function (i) { if (i.board_id === b.id) i.board_id = null; });
-      api.deleteBoard(b.id); ui.board = 'all'; closeSheet(); renderHome(); toast('Board deleted');
-    };
-  }
   function boardChips(it) {
     var opts = db.boards.concat((db.shared || []).filter(function (b) { return b.role === 'editor'; }));
     return '<div class="chips wrap" data-role="boards">' + opts.map(function (b) {
@@ -601,7 +504,7 @@
       };
     });
     var nb = root.querySelector('[data-new-board]');
-    if (nb) nb.onclick = function () { promptBoard(function (b) { it.board_id = b.id; var wrap = root.querySelector('[data-role=boards]'); wrap.outerHTML = boardChips(it); bindBoardChips(root, it, onChange); onChange(); }); };
+    if (nb) nb.onclick = function () { promptBoard(function (b) { it.board_id = b.id; var wrap = root.querySelector('[data-role=boards]'); wrap.outerHTML = boardChips(it); bindBoardChips(root, it, onChange); onChange(); }, nb); };
   }
 
   /* ---------- size / details ---------- */
@@ -839,13 +742,14 @@
     var s = sheet(
       '<div class="hero-img' + (img ? '' : ' none') + '" id="iHero">' + (img ? '<img src="' + esc(img) + '" alt="" referrerpolicy="no-referrer">' : letter(it)) + tagsHtml(it) + '</div>' +
       '<div id="iHead"></div>' +
+      '<div class="row act">' +
+        (safeLink(it.url) ? '<a class="btn primary" id="openStore" href="' + esc(safeLink(it.url)) + '" target="_blank" rel="noopener noreferrer">Open store page</a>' : '') +
+        '<button class="btn" type="button" id="boughtBtn"></button>' +
+      '</div>' +
       (mine ? '<h3>Board</h3>' + boardChips(it) : '') + sizeHtml(it) +
       '<label class="field" style="margin-top:1rem"><span>Note</span><textarea data-f="note" maxlength="300" placeholder="Add a note">' + esc(it.note) + '</textarea></label>' +
-      '<label class="switch"><span>Sold out</span><input type="checkbox" role="switch" id="soldSw"' + (it.sold_out ? ' checked' : '') + '><i aria-hidden="true"></i></label>' +
-      '<div class="stack">' +
-        '<button class="btn primary block" type="button" id="boughtBtn"></button>' +
-        (safeLink(it.url) ? '<a class="btn block" id="openStore" href="' + esc(safeLink(it.url)) + '" target="_blank" rel="noopener noreferrer">Open store page</a>' : '') +
-      '</div>' +
+      switchHtml('soldSw', 'Sold out', '', it.sold_out) +
+      (mine && !(CLOUD && sharedBoard(it.board_id)) ? switchHtml('budgetSw', 'Count in my budget', 'Turn off for gifts, wishes or anything you\'re not paying for.', it.in_budget !== false) : '') +
       detailsHtml(it, false) +
       (canDelete ? '<div class="stack"><button class="link danger" type="button" id="delBtn">Delete item</button></div>' : ''));
     var head = s.querySelector('#iHead'), hero = s.querySelector('#iHero'), bb = s.querySelector('#boughtBtn');
@@ -854,7 +758,7 @@
         '<p class="muted"><span class="brand">' + esc(it.brand) + '</span>' + (it.board_id ? ' · ' + esc(boardName(it.board_id)) : '') + '</p>' +
         (it.price != null ? '<div class="price">' + esc(money(it.price, it.currency)) + (it.was_price > it.price ? '<s>' + esc(fmt(it.was_price)) + '</s>' : '') + '</div>' : '');
       var t = hero.querySelector('.tags'); if (t) t.remove(); hero.insertAdjacentHTML('beforeend', tagsHtml(it));
-      bb.textContent = it.bought ? 'Move back to To buy' : 'Mark as bought';
+      bb.textContent = it.bought ? '↩ Move to To buy' : '✓ Mark as bought';
     }
     var change = function (f) {
       api.saveItemSoon(it); paint(); renderHome();
@@ -864,6 +768,7 @@
     paint();
     bindBoardChips(s, it, change); bindSize(s, it, change); bindFields(s, it, change);
     s.querySelector('#soldSw').onchange = function (e) { it.sold_out = e.target.checked; change(); };
+    var bs = s.querySelector('#budgetSw'); if (bs) bs.onchange = function (e) { it.in_budget = e.target.checked; change(); toast(it.in_budget ? 'Counts in your budget' : 'Not counted in your budget'); };
     bb.onclick = function () { it.bought = !it.bought; api.saveItem(it); closeSheet(); renderHome(); toast(it.bought ? 'Marked as bought. Enjoy it!' : 'Moved back to To buy'); };
     var del = s.querySelector('#delBtn');
     if (del) del.onclick = function () {
@@ -1029,24 +934,6 @@
     document.getElementById('homeLink').onclick = function (e) { e.preventDefault(); goHome(); };
   }
 
-  async function ensureUsername() {
-    if (user.username) return;
-    var sug = suggestUsername(user.name);
-    var s = sheet('<h2>Pick a username</h2><p class="muted" style="margin-bottom:1rem">It\'s how friends find you, follow you and add you to boards.</p>' +
-      '<form id="unForm" novalidate><label class="field"><span>Username</span><span class="at"><input type="text" name="username" autocapitalize="off" autocomplete="username" spellcheck="false" maxlength="20" value="' + esc(sug) + '"></span>' +
-      '<small class="ferr" id="unErr"></small><small class="fok" id="unOk"></small></label><button class="btn primary block" type="submit">Save</button></form>', { locked: true });
-    var input = s.querySelector('[name=username]'), st = bindUsername(input, s.querySelector('#unErr'), s.querySelector('#unOk'));
-    if (sug) st.check();
-    s.querySelector('#unForm').onsubmit = async function (e) {
-      e.preventDefault();
-      if (!(await st.check())) return input.focus();
-      var u = cleanUsername(input.value);
-      var r = await sb.from('profiles').upsert({ id: user.id, username: u, name: user.name });
-      if (r.error) { s.querySelector('#unErr').textContent = /duplicate|unique/i.test(r.error.message) ? '@' + u + ' was just taken. Try another.' : friendly(r.error); return; }
-      user.username = u; closeSheet(); toast('Hi @' + u + '!'); route();
-    };
-  }
-
   function openEditProfile() {
     var s = sheet('<h2>Edit profile</h2><form id="epForm" novalidate>' +
       '<label class="field"><span>Name</span><input type="text" name="name" maxlength="50" value="' + esc(user.name) + '"></label>' +
@@ -1095,77 +982,25 @@
     bindPeople(box);
   }
 
-  async function renderProfile(username) {
-    document.title = '@' + username + ' · Stashd';
-    app.innerHTML = '<div class="home">' + topbar() + '<p class="loading muted">Loading…</p></div>'; bindTopbar();
-    var pr = await sb.from('profiles').select('id,username,name').eq('username', cleanUsername(username)).maybeSingle();
-    if (pr.error || !pr.data) {
-      app.innerHTML = '<div class="home">' + topbar() + '<div class="empty"><h2>No one here</h2><p>We couldn\'t find @' + esc(username) + '.</p></div></div>'; bindTopbar(); return;
-    }
-    var p = pr.data, me = user && user.id === p.id;
-    var q = await Promise.all([
-      sb.from('follows').select('follower_id', { count: 'exact', head: true }).eq('following_id', p.id),
-      sb.from('follows').select('following_id', { count: 'exact', head: true }).eq('follower_id', p.id),
-      user && !me ? sb.from('follows').select('follower_id').eq('follower_id', user.id).eq('following_id', p.id).maybeSingle() : Promise.resolve({ data: null }),
-      sb.from('boards').select('id,name,visibility,created_at').eq('user_id', p.id).eq('visibility', 'public').order('created_at')
-    ]);
-    var boards = q[3].data || [], covers = {};
-    if (boards.length) {
-      var it = await sb.from('items').select('board_id,image_url,created_at').in('board_id', boards.map(function (b) { return b.id; })).order('created_at', { ascending: false }).limit(500);
-      (it.data || []).forEach(function (i) { var c = covers[i.board_id] || (covers[i.board_id] = { n: 0, img: '' }); c.n++; if (!c.img && safeImg(i.image_url)) c.img = i.image_url; });
-    }
-    var following = !!q[2].data, nFollowers = q[0].count || 0;
-    function paint() {
-      app.innerHTML = '<div class="home">' + topbar() +
-        '<section class="profile">' + avatar(p, 'big') + '<h1>' + esc(p.name || p.username) + '</h1><p class="muted">@' + esc(p.username) + '</p>' +
-          '<div class="counts"><button type="button" id="fwers"><b>' + nFollowers + '</b> follower' + (nFollowers === 1 ? '' : 's') + '</button><button type="button" id="fwing"><b>' + (q[1].count || 0) + '</b> following</button></div>' +
-          (me ? '<div class="row"><button class="btn" type="button" id="editP">Edit profile</button><button class="btn" type="button" id="shareP">Share profile</button></div>'
-            : user ? '<button class="btn ' + (following ? '' : 'primary') + ' follow" type="button" id="followBtn">' + (following ? 'Following' : 'Follow') + '</button>'
-            : '<button class="btn primary follow" type="button" id="joinBtn">Sign up to follow</button>') +
-        '</section>' +
-        '<h2 class="sec">Public boards</h2>' +
-        (boards.length ? '<section class="boards">' + boards.map(function (b) {
-          var c = covers[b.id] || { n: 0, img: '' };
-          return '<button class="bcard" type="button" data-bid="' + esc(b.id) + '"><span class="bimg' + (c.img ? '' : ' none') + '">' + (c.img ? '<img src="' + esc(c.img) + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : '') + '</span>' +
-            '<b>' + esc(b.name) + '</b><small>' + c.n + ' item' + (c.n === 1 ? '' : 's') + '</small></button>';
-        }).join('') + '</section>' : '<p class="muted">' + (me ? 'None yet. Open a board, tap Board settings and make it Public to show it here.' : 'No public boards yet.') + '</p>') +
-      '</div>';
-      bindTopbar();
-      document.getElementById('fwers').onclick = function () { openFollowList(p, 'followers'); };
-      document.getElementById('fwing').onclick = function () { openFollowList(p, 'following'); };
-      app.querySelectorAll('[data-bid]').forEach(function (b) { b.onclick = function () { nav({ b: b.dataset.bid }); }; });
-      var fb = document.getElementById('followBtn');
-      if (fb) fb.onclick = async function () {
-        fb.disabled = true;
-        var r = following ? await sb.from('follows').delete().eq('follower_id', user.id).eq('following_id', p.id)
-          : await sb.from('follows').insert({ follower_id: user.id, following_id: p.id });
-        if (r.error) { fb.disabled = false; return toast(friendly(r.error)); }
-        following = !following; nFollowers += following ? 1 : -1; paint();
-      };
-      var jb = document.getElementById('joinBtn'); if (jb) jb.onclick = function () { renderAuth('signup'); };
-      var ep = document.getElementById('editP'); if (ep) ep.onclick = openEditProfile;
-      var sp = document.getElementById('shareP'); if (sp) sp.onclick = function () { shareLink(base() + '?u=' + p.username, (p.name || p.username) + ' on Stashd'); };
-    }
-    paint();
-  }
-
   async function renderBoardPage(bid, key) {
     if (user && (roleOf(bid))) {           // my board or one shared with me: open it in my stash
       history.replaceState(null, '', location.pathname); ui.board = bid; ui.tab = 'tobuy'; renderHome(); return;
     }
-    app.innerHTML = '<div class="home">' + topbar() + '<p class="loading muted">Loading…</p></div>'; bindTopbar();
+    var tabs = user ? tabbarHtml('') : '';
+    function fin() { bindTopbar(); if (user) bindTabbar(); }
+    app.innerHTML = '<div class="home has-tabs">' + topbar() + '<p class="loading muted">Loading…</p></div>' + tabs; fin();
     var r = await sb.rpc('shared_board', { bid: bid, k: key || null });
     if (r.error || !r.data) {
       app.innerHTML = '<div class="home">' + topbar() + '<div class="empty"><h2>This board is private</h2><p>' +
         (user ? 'Ask the owner to add you, or to switch on link sharing.' : 'Sign in if it was shared with you.') + '</p>' +
-        (user ? '' : '<button class="btn primary" type="button" id="toAuth">Sign in</button>') + '</div></div>';
-      bindTopbar(); var ta = document.getElementById('toAuth'); if (ta) ta.onclick = function () { renderAuth('signin'); };
+        (user ? '' : '<button class="btn primary" type="button" id="toAuth">Sign in</button>') + '</div></div>' + tabs;
+      fin(); var ta = document.getElementById('toAuth'); if (ta) ta.onclick = function () { renderAuth('signin'); };
       return;
     }
     var d = r.data, b = d.board, owner = d.owner || {}, items = d.items || [];
     document.title = b.name + ' · Stashd';
     var toBuy = items.filter(function (i) { return !i.bought; });
-    app.innerHTML = '<div class="home">' + topbar() +
+    app.innerHTML = '<div class="home has-tabs">' + topbar() +
       '<section class="bhead"><h1>' + esc(b.name) + '</h1>' +
         '<p class="muted">' + (b.visibility === 'public' ? 'Public board' : LOCK + ' Shared by link') + ' · by ' +
         (owner.username ? '<button class="link" type="button" id="ownerLink">@' + esc(owner.username) + '</button>' : esc(owner.name || '')) + '</p>' +
@@ -1173,8 +1008,8 @@
       '</section>' +
       '<div class="sum"><span class="muted">' + toBuy.length + ' to buy · ' + (items.length - toBuy.length) + ' bought</span><strong>' + esc(totals(toBuy, '')) + '</strong></div>' +
       (items.length ? '<section class="grid">' + items.map(cardHtml).join('') + '</section>' : '<div class="empty"><p>Nothing in this board yet.</p></div>') +
-    '</div>';
-    bindTopbar();
+    '</div>' + tabs;
+    fin();
     var ol = document.getElementById('ownerLink'); if (ol) ol.onclick = function () { nav({ u: owner.username }); };
     document.getElementById('shareB').onclick = function () { shareLink(location.href, b.name + ' on Stashd'); };
     var jb = document.getElementById('joinB'); if (jb) jb.onclick = function () { renderAuth('signup'); };
@@ -1200,89 +1035,410 @@
     if (ui.board === bid) renderHome();
   }
 
-  async function openBoardSettings(b) {
-    var s = sheet('<h2>Board settings</h2>' +
-      '<label class="field"><span>Board name</span><input type="text" id="bName" maxlength="40" value="' + esc(b.name) + '"></label>' +
-      '<h3>Who can see it</h3><div class="seg" role="radiogroup"><button type="button" role="radio" data-vis="private">' + LOCK + ' Private</button><button type="button" role="radio" data-vis="public">Public</button></div>' +
-      '<p class="muted small" id="visText"></p>' +
-      '<label class="switch" id="linkRow"><span>Anyone with the link can view</span><input type="checkbox" role="switch" id="linkSw"><i aria-hidden="true"></i></label>' +
-      '<div class="stack"><button class="btn block" type="button" id="shareBtn">Share link</button></div>' +
-      '<h3>People</h3><div id="members" class="people"><p class="loading muted">Loading…</p></div>' +
-      '<form id="addMember" class="addm" novalidate><input type="text" id="mUser" placeholder="@username" autocapitalize="off" spellcheck="false" aria-label="Username to add">' +
-        '<select id="mRole" aria-label="Access"><option value="viewer">View only</option><option value="editor">Can add</option></select><button class="btn primary" type="submit">Add</button></form>' +
-      '<p class="err" id="mErr"></p><p class="muted small">View only: can see the board. Can add: can also add and edit items.</p>' +
-      '<div class="stack"><button class="btn primary block" id="bSave" type="button">Done</button><button class="link danger" id="bDel" type="button">Delete board</button></div>');
-    function paintVis() {
-      s.querySelectorAll('[data-vis]').forEach(function (x) { x.setAttribute('aria-selected', x.dataset.vis === b.visibility); x.setAttribute('aria-checked', x.dataset.vis === b.visibility); });
-      s.querySelector('#visText').textContent = b.visibility === 'public' ? 'Shows on your profile. Anyone with the link can view it.'
-        : 'Only you and the people you add can see it' + (b.link_token ? ', plus anyone with the link.' : '.');
-      s.querySelector('#linkRow').hidden = b.visibility === 'public';
-      s.querySelector('#linkSw').checked = !!b.link_token;
+  /* ---------- icons + small UI helpers ---------- */
+  function svg(d, sw) { return '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="' + (sw || 2) + '" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + d + '</svg>'; }
+  var HOME_SVG = svg('<path d="M4 11.5 12 5l8 6.5"/><path d="M6 10v9h12v-9"/>');
+  var SEARCH_SVG = svg('<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>');
+  var SHARE_SVG = svg('<path d="M12 15V4"/><path d="m7.5 8.5 4.5-4.5 4.5 4.5"/><path d="M5 13v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"/>');
+  var MORE_SVG = svg('<circle cx="5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="19" cy="12" r="1.3" fill="currentColor"/>');
+  var LINK_SVG = svg('<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>');
+  var CHAT_SVG = svg('<path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12z"/>');
+  var GEAR_SVG = svg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>', 1.6);
+  var membersCache = {};
+
+  function switchHtml(id, label, desc, on) {
+    return '<label class="switch"><span><b>' + label + '</b>' + (desc ? '<small>' + desc + '</small>' : '') + '</span><input type="checkbox" role="switch" id="' + id + '"' + (on ? ' checked' : '') + '><i aria-hidden="true"></i></label>';
+  }
+  function boardById(id) { return db.boards.find(function (b) { return b.id === id; }) || (db.shared || []).find(function (b) { return b.id === id; }) || null; }
+  // Does this item count toward my "Left to spend"?
+  function counts(it) {
+    if (it.in_budget === false) return false;
+    if (!it.board_id) return true;
+    var b = db.boards.find(function (x) { return x.id === it.board_id; });
+    return b ? b.in_budget !== false : false;
+  }
+  async function loadMembers(b) {
+    var r = await sb.from('board_members').select('user_id,role,created_at,p:profiles(id,username,name)').eq('board_id', b.id).order('created_at');
+    membersCache[b.id] = r.error ? [] : r.data.filter(function (m) { return m.p; });
+    return membersCache[b.id];
+  }
+  function stackHtml(b) {
+    var owner = roleOf(b.id) === 'owner' ? user : b.owner;
+    var ms = membersCache[b.id] || [];
+    var people = [owner].concat(ms.map(function (m) { return m.p; })).filter(Boolean);
+    return '<span class="stackav">' + people.slice(0, 4).map(function (p) { return avatar(p); }).join('') + (people.length > 4 ? '<span class="av more">+' + (people.length - 4) + '</span>' : '') + '</span>';
+  }
+
+  /* ---------- tab bar ---------- */
+  function tabbarHtml(active) {
+    function tab(id, label, icon) { return '<button class="tab" type="button" data-go="' + id + '"' + (active === id ? ' aria-current="page"' : '') + '>' + icon + '<span>' + label + '</span></button>'; }
+    return '<nav class="tabbar" aria-label="Main">' + tab('home', 'Stash', HOME_SVG) + (CLOUD ? tab('search', 'Search', SEARCH_SVG) : '') +
+      '<button class="tab add" type="button" data-go="add" aria-label="Add a link"><span class="plus">+</span></button>' +
+      tab('profile', CLOUD ? 'Profile' : 'Account', avatar(user, 'sm')) + '</nav>';
+  }
+  function bindTabbar() {
+    document.body.classList.add('tabs');
+    app.querySelectorAll('[data-go]').forEach(function (b) {
+      b.onclick = function () {
+        var g = b.dataset.go;
+        if (g === 'home') { if (location.search) goHome(); else { ui.board = 'all'; renderHome(); window.scrollTo(0, 0); } }
+        else if (g === 'search') openPeople();
+        else if (g === 'add') openAdd();
+        else if (g === 'profile') { if (!CLOUD) openMenu(); else if (user.username) nav({ u: user.username }); else ensureUsername(); }
+      };
+    });
+  }
+
+  /* ---------- home ---------- */
+  function renderHome() {
+    document.title = 'Stashd';
+    if (ui.board !== 'all' && !boardName(ui.board)) ui.board = 'all';
+    var shB = CLOUD ? sharedBoard(ui.board) : null, ownB = db.boards.find(function (b) { return b.id === ui.board; });
+    var ownIds = db.boards.map(function (b) { return b.id; });
+    if (shB && cache[ui.board] === undefined) { cache[ui.board] = null; loadShared(ui.board); }
+    var cur = ownB || shB;
+    if (CLOUD && cur && membersCache[cur.id] === undefined) { membersCache[cur.id] = []; loadMembers(cur).then(function () { if (ui.board === cur.id && !document.querySelector('.overlay')) renderHome(); }); }
+    var inBoard = shB ? (cache[ui.board] || [])
+      : ui.board === 'all' ? db.items.filter(function (i) { return !i.board_id || ownIds.indexOf(i.board_id) >= 0; })
+      : db.items.filter(function (i) { return i.board_id === ui.board; });
+    var toBuy = inBoard.filter(function (i) { return !i.bought; }), bought = inBoard.filter(function (i) { return i.bought; });
+    var tabItems = ui.tab === 'bought' ? bought : toBuy;
+    var list = tabItems.slice().sort(function (a, b) { return (b.created_at || '').localeCompare(a.created_at || ''); });
+
+    var sumLabel, sumVal, sumNote = '';
+    if (shB) { sumLabel = ui.tab === 'bought' ? 'Bought' : 'Total'; sumVal = totals(tabItems, ''); sumNote = 'Shared boards don\'t count in your budget.'; }
+    else if (ownB && ownB.in_budget === false) { sumLabel = 'Total'; sumVal = totals(tabItems, user.currency); sumNote = 'This board isn\'t in your budget.'; }
+    else {
+      var counted = tabItems.filter(counts), skipped = tabItems.length - counted.length;
+      sumLabel = ui.tab === 'bought' ? 'Spent' : 'Left to spend'; sumVal = totals(counted, user.currency);
+      if (skipped) sumNote = skipped + ' item' + (skipped === 1 ? '' : 's') + ' not counted in your budget.';
     }
-    paintVis();
-    s.querySelectorAll('[data-vis]').forEach(function (x) { x.onclick = function () { if (b.visibility === x.dataset.vis) return; b.visibility = x.dataset.vis; api.saveBoard(b); paintVis(); renderHome(); }; });
-    s.querySelector('#linkSw').onchange = function (e) { b.link_token = e.target.checked ? uid() : null; api.saveBoard(b); paintVis(); toast(e.target.checked ? 'Link sharing on' : 'Link sharing off. Old links stop working.'); };
-    s.querySelector('#shareBtn').onclick = function () { shareLink(boardLink(b), b.name + ' on Stashd'); };
-    var membersEl = s.querySelector('#members');
-    async function loadMembers() {
-      var r = await sb.from('board_members').select('user_id,role,p:profiles(id,username,name)').eq('board_id', b.id).order('created_at');
-      if (r.error) { membersEl.innerHTML = '<p class="err">' + esc(friendly(r.error)) + '</p>'; return; }
-      membersEl.innerHTML = '<div class="person me">' + avatar(user) + '<span><b>' + esc(user.name) + ' (you)</b><small>Owner</small></span></div>' +
-        r.data.map(function (m) {
-          var p = m.p || {};
-          return '<div class="person">' + avatar(p) + '<span><b>' + esc(p.name || p.username) + '</b><small>@' + esc(p.username || '') + '</small></span>' +
-            '<select data-mrole="' + esc(m.user_id) + '" aria-label="Access for ' + esc(p.username || '') + '"><option value="viewer"' + (m.role === 'viewer' ? ' selected' : '') + '>View only</option><option value="editor"' + (m.role === 'editor' ? ' selected' : '') + '>Can add</option></select>' +
-            '<button class="icon rm" type="button" data-mrm="' + esc(m.user_id) + '" aria-label="Remove ' + esc(p.username || '') + '">×</button></div>';
-        }).join('');
-      membersEl.querySelectorAll('[data-mrole]').forEach(function (sel) {
-        sel.onchange = async function () { var x = await sb.from('board_members').update({ role: sel.value }).eq('board_id', b.id).eq('user_id', sel.dataset.mrole); toast(x.error ? friendly(x.error) : 'Access updated'); };
-      });
-      membersEl.querySelectorAll('[data-mrm]').forEach(function (btn) {
-        btn.onclick = async function () { var x = await sb.from('board_members').delete().eq('board_id', b.id).eq('user_id', btn.dataset.mrm); if (x.error) return toast(friendly(x.error)); loadMembers(); toast('Removed'); };
-      });
-    }
-    loadMembers();
-    s.querySelector('#addMember').onsubmit = async function (e) {
+
+    app.innerHTML =
+      '<div class="home has-tabs">' +
+        '<header class="top"><h1 class="wm">Stash<span>d</span></h1></header>' +
+        '<nav class="chips" aria-label="Boards">' +
+          '<button class="chip" type="button" data-board="all" aria-pressed="' + (ui.board === 'all') + '">All</button>' +
+          db.boards.map(function (b) { return '<button class="chip" type="button" data-board="' + esc(b.id) + '" aria-pressed="' + (ui.board === b.id) + '">' + (CLOUD && b.visibility !== 'public' ? LOCK + ' ' : '') + esc(b.name) + '</button>'; }).join('') +
+          (db.shared || []).map(function (b) { return '<button class="chip shared" type="button" title="Shared by @' + esc((b.owner && b.owner.username) || '') + '" data-board="' + esc(b.id) + '" aria-pressed="' + (ui.board === b.id) + '">' + PEOPLE_SVG.replace(/22/g, '14') + ' ' + esc(b.name) + '</button>'; }).join('') +
+          '<button class="chip ghost" type="button" id="newBoardBtn">+ Board</button>' +
+        '</nav>' +
+        (cur ? boardHeaderHtml(cur, !!ownB, inBoard.length) : '') +
+        '<div class="seg" role="tablist">' +
+          '<button type="button" role="tab" data-tab="tobuy" aria-selected="' + (ui.tab === 'tobuy') + '">To buy · ' + toBuy.length + '</button>' +
+          '<button type="button" role="tab" data-tab="bought" aria-selected="' + (ui.tab === 'bought') + '">Bought · ' + bought.length + '</button>' +
+        '</div>' +
+        (CLOUD && localStashes().length ? '<div class="hint" style="margin:0 0 1rem">You have items from the test version saved on this device. <div class="row" style="margin-top:.6rem"><button class="btn primary" type="button" id="importBtn">Move them to my account</button><button class="btn" type="button" id="importNo">No thanks</button></div></div>' : '') +
+        '<div class="sum"><div><span class="muted">' + sumLabel + '</span>' + (sumNote ? '<small>' + esc(sumNote) + '</small>' : '') + '</div><strong>' + esc(sumVal) + '</strong></div>' +
+        (shB && cache[ui.board] === null ? '<p class="loading muted">Loading…</p>'
+          : list.length ? '<section class="grid">' + list.map(cardHtml).join('') + '</section>'
+          : cur ? '<div class="empty"><h2>' + (ui.tab === 'bought' ? 'Nothing bought here yet' : 'This board is empty') + '</h2>' + (ui.tab === 'bought' || (shB && shB.role !== 'editor') ? '' : '<p>Tap + to add something you love.</p>') + '</div>'
+          : emptyHtml()) +
+      '</div>' + tabbarHtml('home');
+
+    bindTabbar();
+    document.getElementById('newBoardBtn').onclick = function () { openBoardEditor(null); };
+    app.querySelectorAll('[data-board]').forEach(function (b) { b.onclick = function () { ui.board = b.dataset.board; renderHome(); }; });
+    app.querySelectorAll('[data-tab]').forEach(function (b) { b.onclick = function () { ui.tab = b.dataset.tab; renderHome(); }; });
+    app.querySelectorAll('.card').forEach(function (c) { c.onclick = function () { openItem(c.dataset.id); }; });
+    var es = document.getElementById('emptyAdd'); if (es) es.onclick = openAdd;
+    var ss = document.getElementById('emptySetup'); if (ss) ss.onclick = openSetup;
+    var ib = document.getElementById('importBtn'); if (ib) ib.onclick = function () { importLocal(ib); };
+    var inb = document.getElementById('importNo'); if (inb) inb.onclick = function () { save('stashd:imported', true); renderHome(); };
+    if (cur) bindBoardHeader(cur, !!ownB);
+    var sel = app.querySelector('.chip[aria-pressed=true]'); if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  function boardHeaderHtml(b, own, n) {
+    var secret = CLOUD && b.visibility !== 'public';
+    return '<section class="bhead2">' +
+      '<div class="bt"><h2>' + esc(b.name) + '</h2>' + (secret ? '<span class="lockb" title="Secret board">' + LOCK.replace(/12/g, '16') + '</span>' : '') + '</div>' +
+      '<p class="muted small">' + n + ' item' + (n === 1 ? '' : 's') + (own ? (secret ? ' · Secret' : CLOUD ? ' · Public' : '') : ' · Shared by @' + esc((b.owner && b.owner.username) || '') + ' · ' + (b.role === 'editor' ? 'you can add' : 'view only')) + '</p>' +
+      '<div class="bact">' +
+        (CLOUD ? '<button class="collab" type="button" id="collabBtn" aria-label="' + (own ? 'Invite collaborators' : 'See who\'s on this board') + '">' + stackHtml(b) + (own ? '<span class="av add">+</span>' : '') + '</button>' : '') +
+        (own ? '<button class="pill" type="button" id="budgetPill" aria-pressed="' + (b.in_budget !== false) + '">' + (b.in_budget !== false ? '✓ In my budget' : 'Not in my budget') + '</button>' : '') +
+        '<span class="grow"></span>' +
+        (CLOUD ? '<button class="icon soft" type="button" id="shareB" aria-label="Share board">' + SHARE_SVG + '</button>' : '') +
+        '<button class="icon soft" type="button" id="moreB" aria-label="' + (own ? 'Edit board' : 'Board info') + '">' + MORE_SVG + '</button>' +
+      '</div></section>';
+  }
+  function bindBoardHeader(b, own) {
+    var bp = document.getElementById('budgetPill');
+    if (bp) bp.onclick = function () { b.in_budget = b.in_budget === false; api.saveBoard(b); renderHome(); toast(b.in_budget ? 'Counts in your budget' : 'Not counted in your budget'); };
+    var cb = document.getElementById('collabBtn'); if (cb) cb.onclick = function () { own ? openInvite(b) : openBoardInfo(b); };
+    var sh = document.getElementById('shareB'); if (sh) sh.onclick = function () { openShare(b); };
+    document.getElementById('moreB').onclick = function () { own ? openBoardEditor(b) : openBoardInfo(b); };
+  }
+
+  function emptyHtml() {
+    if (ui.tab === 'bought') return '<div class="empty"><h2>Nothing bought yet</h2><p>Open an item and tap Mark as bought. Treat yourself.</p></div>';
+    return '<div class="empty"><h2>Your stash is empty</h2><p>Paste a product link, or share one straight to Stashd from any app.</p>' +
+      '<button class="btn primary" id="emptyAdd" type="button">Add a link</button><br><button class="link" id="emptySetup" type="button">Set up Share to Stashd</button></div>';
+  }
+
+  function cardHtml(it) {
+    var img = safeImg(it.image_url);
+    var sub = [it.brand ? '<span class="brand">' + esc(it.brand) + '</span>' : '', it.price != null ? esc(money(it.price, it.currency)) : ''].filter(Boolean).join(' · ');
+    return '<button class="card" type="button" data-id="' + esc(it.id) + '">' +
+      '<div class="ph' + (img ? '' : ' none') + '">' + (img ? '<img src="' + esc(img) + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : letter(it)) + tagsHtml(it) + '</div>' +
+      '<div class="meta"><b>' + esc(it.title || 'Untitled item') + '</b>' + (sub ? '<small>' + sub + '</small>' : '') +
+      (it.in_budget === false ? '<small class="nb">Not in budget</small>' : '') + '</div></button>';
+  }
+
+  /* ---------- create / edit board ---------- */
+  function openBoardEditor(b, done) {
+    var isNew = !b;
+    var d = b || { name: '', visibility: 'private', in_budget: true };
+    var s = sheet('<h2>' + (isNew ? 'Create board' : 'Edit board') + '</h2><form id="beForm" novalidate>' +
+      '<label class="field"><span>Name</span><input type="text" name="name" maxlength="40" placeholder="Like “Eid outfits” or “Home”" value="' + esc(d.name) + '" autocapitalize="sentences" required><small class="ferr" id="beErr"></small></label>' +
+      (CLOUD ? switchHtml('secretSw', 'Keep this board secret', 'Only you and people you invite can see it.', d.visibility !== 'public') : '') +
+      switchHtml('budgetSw', 'Count in my budget', 'Items here add to your Left to spend.', d.in_budget !== false) +
+      (!isNew && CLOUD ? '<h3>Collaborators</h3><button class="person" type="button" id="manageCollab">' + stackHtml(b) + '<span><b>Invite or manage people</b><small>Choose who can view or add</small></span><em>›</em></button>' : '') +
+      '<div class="stack"><button class="btn primary block" type="submit">' + (isNew ? 'Create' : 'Done') + '</button>' +
+      (isNew ? '' : '<button class="link danger" type="button" id="bDel">Delete board</button>') + '</div></form>');
+    if (isNew) setTimeout(function () { s.querySelector('[name=name]').focus(); }, 80);
+    var mc = s.querySelector('#manageCollab'); if (mc) mc.onclick = function () { openInvite(b); };
+    s.querySelector('#beForm').onsubmit = function (e) {
       e.preventDefault();
-      var err = s.querySelector('#mErr'), u = cleanUsername(s.querySelector('#mUser').value);
-      err.textContent = '';
-      if (!u) return (err.textContent = 'Type their @username.');
-      if (u === user.username) return (err.textContent = 'That\'s you! You already own this board.');
-      var p = await sb.from('profiles').select('id,username').eq('username', u).maybeSingle();
-      if (!p.data) return (err.textContent = 'No one with the username @' + u + '.');
-      var r = await sb.from('board_members').upsert({ board_id: b.id, user_id: p.data.id, role: s.querySelector('#mRole').value });
-      if (r.error) return (err.textContent = friendly(r.error));
-      s.querySelector('#mUser').value = ''; loadMembers(); toast('@' + u + ' added');
+      var name = s.querySelector('[name=name]').value.trim().replace(/\s+/g, ' ');
+      if (!name) { s.querySelector('#beErr').textContent = 'Give your board a name.'; return s.querySelector('[name=name]').focus(); }
+      var secret = s.querySelector('#secretSw'), inBudget = s.querySelector('#budgetSw').checked;
+      if (isNew) {
+        b = newBoard(name.slice(0, 40)); db.boards.push(b);
+      } else b.name = name.slice(0, 40);
+      b.visibility = secret && !secret.checked ? 'public' : 'private';
+      b.in_budget = inBudget;
+      api.saveBoard(b); closeSheet();
+      if (done) return done(b);
+      if (isNew) { ui.board = b.id; ui.tab = 'tobuy'; toast('Board "' + b.name + '" created'); }
+      renderHome();
     };
-    s.querySelector('#bSave').onclick = function () { var n = s.querySelector('#bName').value.trim(); if (n && n !== b.name) { b.name = n.slice(0, 40); api.saveBoard(b); } closeSheet(); renderHome(); };
-    s.querySelector('#bDel').onclick = function () {
-      if (!confirm('Delete the board "' + b.name + '"? Your items stay in All. People you shared it with lose access.')) return;
+    var del = s.querySelector('#bDel');
+    if (del) del.onclick = function () {
+      if (!confirm('Delete the board "' + b.name + '"? Your items stay in All.' + (CLOUD ? ' People you shared it with lose access.' : ''))) return;
       db.boards = db.boards.filter(function (x) { return x.id !== b.id; });
       db.items = db.items.filter(function (i) { return i.board_id !== b.id || i.user_id === user.id; });
       db.items.forEach(function (i) { if (i.board_id === b.id) i.board_id = null; });
       api.deleteBoard(b.id); ui.board = 'all'; closeSheet(); renderHome(); toast('Board deleted');
     };
   }
+  // "+ New" inside the Save / item sheets: an inline name box, so the sheet stays open.
+  function promptBoard(done, btn) {
+    if (!btn) return openBoardEditor(null, done);
+    var wrap = document.createElement('span'); wrap.className = 'newb';
+    wrap.innerHTML = '<input type="text" maxlength="40" placeholder="Board name" aria-label="New board name"><button class="chip" type="button">Add</button>';
+    btn.replaceWith(wrap);
+    var input = wrap.querySelector('input'); input.focus();
+    function add() {
+      var name = input.value.trim(); if (!name) return input.focus();
+      var b = newBoard(name.slice(0, 40)); db.boards.push(b); api.saveBoard(b); toast('Board "' + b.name + '" created'); done(b);
+    }
+    wrap.querySelector('button').onclick = add;
+    input.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); add(); } };
+  }
+
+  /* ---------- share + invite (Pinterest-style) ---------- */
+  function openShare(b) {
+    var own = roleOf(b.id) === 'owner';
+    var s = sheet('<h2>Share board</h2><p class="muted small" id="shareNote"></p>' +
+      '<div class="sharerow">' +
+        '<button type="button" id="sCopy"><span class="sico">' + LINK_SVG + '</span>Copy link</button>' +
+        '<a id="sWa" target="_blank" rel="noopener noreferrer"><span class="sico">' + CHAT_SVG + '</span>WhatsApp</a>' +
+        (navigator.share ? '<button type="button" id="sMore"><span class="sico">' + SHARE_SVG + '</span>More</button>' : '') +
+      '</div>' +
+      (own && b.visibility !== 'public' ? switchHtml('linkSw', 'Anyone with the link can view', 'Turning it off makes old links stop working.', !!b.link_token) : '') +
+      (own ? '<div class="stack"><button class="btn block" type="button" id="sInvite">Invite collaborators</button></div>' : ''));
+    var url;
+    function paint() {
+      url = own ? boardLink(b) : base() + '?b=' + b.id;
+      s.querySelector('#shareNote').textContent = b.visibility === 'public' ? 'Anyone with the link can see this board.'
+        : b.link_token ? 'Anyone with the link can view it. Only collaborators can add.' : 'Only you and collaborators can open this link.';
+      s.querySelector('#sWa').href = 'https://wa.me/?text=' + encodeURIComponent(b.name + ' on Stashd: ' + url);
+    }
+    paint();
+    s.querySelector('#sCopy').onclick = function () {
+      (navigator.clipboard ? navigator.clipboard.writeText(url) : Promise.reject()).then(function () { toast('Link copied'); }).catch(function () { window.prompt('Copy this link', url); });
+    };
+    var m = s.querySelector('#sMore'); if (m) m.onclick = function () { navigator.share({ title: b.name + ' on Stashd', url: url }).catch(function () {}); };
+    var ls = s.querySelector('#linkSw'); if (ls) ls.onchange = function () { b.link_token = ls.checked ? uid() : null; api.saveBoard(b); paint(); toast(ls.checked ? 'Link sharing on' : 'Link sharing off'); };
+    var inv = s.querySelector('#sInvite'); if (inv) inv.onclick = function () { openInvite(b); };
+  }
+
+  async function openInvite(b) {
+    var role = 'editor';
+    var s = sheet('<h2>Invite collaborators</h2>' +
+      '<div class="seg" role="radiogroup" aria-label="Access for people you invite"><button type="button" role="radio" data-role="editor">Can add</button><button type="button" role="radio" data-role="viewer">View only</button></div>' +
+      '<p class="muted small" id="roleNote" style="margin:-.4rem 0 .9rem"></p>' +
+      '<label class="field"><span class="sr">Search people</span><input type="search" id="iq" placeholder="Search by name or @username" autocapitalize="off" spellcheck="false" enterkeyhint="search"></label>' +
+      '<h3 id="resTitle">People you follow</h3><div class="people" id="ires"><p class="loading muted">Loading…</p></div>' +
+      '<h3>On this board</h3><div class="people" id="imem"></div>');
+    function paintRole() {
+      s.querySelectorAll('[data-role]').forEach(function (x) { x.setAttribute('aria-selected', x.dataset.role === role); x.setAttribute('aria-checked', x.dataset.role === role); });
+      s.querySelector('#roleNote').textContent = role === 'editor' ? 'They can see the board and add or edit items.' : 'They can see the board but not change it.';
+    }
+    paintRole();
+    s.querySelectorAll('[data-role]').forEach(function (x) { x.onclick = function () { role = x.dataset.role; paintRole(); }; });
+    var members = await loadMembers(b), results = [];
+    function isMember(id) { return members.some(function (m) { return m.user_id === id; }); }
+    function paintResults() {
+      var el = s.querySelector('#ires');
+      el.innerHTML = results.length ? results.map(function (p) {
+        return '<div class="person">' + avatar(p) + '<span><b>' + esc(p.name || p.username) + '</b><small>@' + esc(p.username) + '</small></span>' +
+          (isMember(p.id) ? '<em>Added</em>' : '<button class="btn small" type="button" data-invite="' + esc(p.id) + '">Invite</button>') + '</div>';
+      }).join('') : '<p class="muted small">' + (s.querySelector('#iq').value.trim() ? 'No one found.' : 'Search for friends by name or @username.') + '</p>';
+      el.querySelectorAll('[data-invite]').forEach(function (btn) {
+        btn.onclick = async function () {
+          btn.disabled = true;
+          var r = await sb.from('board_members').upsert({ board_id: b.id, user_id: btn.dataset.invite, role: role });
+          if (r.error) { btn.disabled = false; return toast(friendly(r.error)); }
+          members = await loadMembers(b); paintResults(); paintMembers(); renderHome();
+          toast('Invited · ' + (role === 'editor' ? 'can add' : 'view only'));
+        };
+      });
+    }
+    function paintMembers() {
+      var el = s.querySelector('#imem');
+      el.innerHTML = '<div class="person">' + avatar(user) + '<span><b>' + esc(user.name) + ' (you)</b><small>Owner</small></span></div>' +
+        members.map(function (m) {
+          return '<div class="person">' + avatar(m.p) + '<span><b>' + esc(m.p.name || m.p.username) + '</b><small>@' + esc(m.p.username || '') + '</small></span>' +
+            '<select data-mrole="' + esc(m.user_id) + '" aria-label="Access for @' + esc(m.p.username || '') + '"><option value="editor"' + (m.role === 'editor' ? ' selected' : '') + '>Can add</option><option value="viewer"' + (m.role === 'viewer' ? ' selected' : '') + '>View only</option></select>' +
+            '<button class="icon rm" type="button" data-mrm="' + esc(m.user_id) + '" aria-label="Remove @' + esc(m.p.username || '') + '">×</button></div>';
+        }).join('');
+      el.querySelectorAll('[data-mrole]').forEach(function (sel) {
+        sel.onchange = async function () { var x = await sb.from('board_members').update({ role: sel.value }).eq('board_id', b.id).eq('user_id', sel.dataset.mrole); toast(x.error ? friendly(x.error) : 'Access updated'); members = await loadMembers(b); };
+      });
+      el.querySelectorAll('[data-mrm]').forEach(function (btn) {
+        btn.onclick = async function () { var x = await sb.from('board_members').delete().eq('board_id', b.id).eq('user_id', btn.dataset.mrm); if (x.error) return toast(friendly(x.error)); members = await loadMembers(b); paintMembers(); paintResults(); renderHome(); toast('Removed'); };
+      });
+    }
+    paintMembers();
+    var f = await sb.from('follows').select('p:profiles!follows_following_id_fkey(id,username,name)').eq('follower_id', user.id).limit(30);
+    results = ((f.data || []).map(function (x) { return x.p; })).filter(function (p) { return p && p.username; });
+    paintResults();
+    var q = s.querySelector('#iq'), t, seq = 0;
+    q.oninput = function () {
+      clearTimeout(t);
+      t = setTimeout(async function () {
+        var v = q.value.trim().replace(/^@/, '').replace(/[,()%*\\]/g, ''), my = ++seq;
+        if (v.length < 2) { s.querySelector('#resTitle').textContent = 'People you follow'; results = ((f.data || []).map(function (x) { return x.p; })).filter(function (p) { return p && p.username; }); return paintResults(); }
+        var r = await sb.from('profiles').select('id,username,name').not('username', 'is', null).neq('id', user.id).or('username.ilike.' + v.toLowerCase() + '%,name.ilike.%' + v + '%').limit(20);
+        if (my !== seq) return;
+        s.querySelector('#resTitle').textContent = 'Results'; results = r.data || []; paintResults();
+      }, 250);
+    };
+  }
 
   async function openBoardInfo(b) {
     var s = sheet('<h2>' + esc(b.name) + '</h2><p class="muted">Shared with you by ' + (b.owner && b.owner.username ? '<button class="link" type="button" id="ownerLink">@' + esc(b.owner.username) + '</button>' : 'its owner') +
       '. You can ' + (b.role === 'editor' ? 'view it and add items' : 'view it') + '.</p>' +
-      '<h3>People</h3><div class="people" id="members"><p class="loading muted">Loading…</p></div>' +
-      '<div class="stack"><button class="btn block" type="button" id="shareBtn">Share link</button><button class="link danger" type="button" id="leave">Leave board</button></div>' +
-      '<p class="muted small">The link only works for people who have access' + (b.visibility === 'public' ? ', or anyone, since this board is public' : '') + '.</p>');
+      '<h3>People on this board</h3><div class="people" id="members"><p class="loading muted">Loading…</p></div>' +
+      '<div class="stack"><button class="btn block" type="button" id="shareBtn">Share</button><button class="link danger" type="button" id="leave">Leave board</button></div>');
     var ol = s.querySelector('#ownerLink'); if (ol) ol.onclick = function () { closeSheet(); nav({ u: b.owner.username }); };
-    s.querySelector('#shareBtn').onclick = function () { shareLink(base() + '?b=' + b.id, b.name + ' on Stashd'); };
+    s.querySelector('#shareBtn').onclick = function () { openShare(b); };
     s.querySelector('#leave').onclick = async function () {
-      if (!confirm('Leave "' + b.name + '"? You\'ll need to be added again to see it.')) return;
+      if (!confirm('Leave "' + b.name + '"? You\'ll need to be invited again to see it.')) return;
       var r = await sb.from('board_members').delete().eq('board_id', b.id).eq('user_id', user.id);
       if (r.error) return toast(friendly(r.error));
       db.shared = db.shared.filter(function (x) { return x.id !== b.id; }); ui.board = 'all'; closeSheet(); renderHome(); toast('You left the board');
     };
-    var r = await sb.from('board_members').select('role,p:profiles(id,username,name)').eq('board_id', b.id).order('created_at');
-    var el = s.querySelector('#members');
-    if (r.error) { el.innerHTML = '<p class="err">' + esc(friendly(r.error)) + '</p>'; return; }
-    el.innerHTML = (b.owner ? personRow(b.owner, '<em>Owner</em>') : '') + r.data.map(function (m) { return m.p ? personRow(m.p, '<em>' + (m.role === 'editor' ? 'Can add' : 'View only') + '</em>') : ''; }).join('');
+    var ms = await loadMembers(b), el = s.querySelector('#members');
+    el.innerHTML = (b.owner ? personRow(b.owner, '<em>Owner</em>') : '') + ms.map(function (m) { return personRow(m.p, '<em>' + (m.user_id === user.id ? 'You · ' : '') + (m.role === 'editor' ? 'Can add' : 'View only') + '</em>'); }).join('');
     bindPeople(el);
+  }
+
+  /* ---------- profile setup (after sign-up, or first Google sign-in) ---------- */
+  async function ensureUsername() {
+    if (user.username) return;
+    var local = (user.email || '').split('@')[0];
+    var name0 = user.name && user.name !== local ? user.name : '';
+    var s = sheet('<h2>Set up your profile</h2><p class="muted" style="margin-bottom:1rem">Friends find you by your username. You can change it later.</p>' +
+      '<form id="unForm" novalidate>' +
+        '<label class="field"><span>Name</span><input type="text" name="name" autocomplete="name" autocapitalize="words" maxlength="50" value="' + esc(name0) + '"><small class="ferr" id="nmErr"></small></label>' +
+        '<label class="field"><span>Username</span><span class="at"><input type="text" name="username" autocapitalize="off" autocomplete="username" spellcheck="false" maxlength="20" value="' + esc(suggestUsername(name0)) + '"></span>' +
+        '<small class="ferr" id="unErr"></small><small class="fok" id="unOk"></small><small class="help">Letters, numbers, dots and underscores.</small></label>' +
+        '<button class="btn primary block" type="submit">Continue</button></form>', { locked: true });
+    var nameIn = s.querySelector('[name=name]'), input = s.querySelector('[name=username]'), edited = false;
+    var st = bindUsername(input, s.querySelector('#unErr'), s.querySelector('#unOk'));
+    input.addEventListener('input', function () { edited = true; });
+    nameIn.addEventListener('input', function () { if (!edited) { input.value = suggestUsername(nameIn.value); st.check(); } });
+    if (input.value) st.check();
+    if (!name0) setTimeout(function () { nameIn.focus(); }, 80);
+    s.querySelector('#unForm').onsubmit = async function (e) {
+      e.preventDefault();
+      var name = nameIn.value.trim().replace(/\s+/g, ' ');
+      s.querySelector('#nmErr').textContent = name ? '' : 'Add your name.';
+      if (!name) return nameIn.focus();
+      if (!(await st.check())) return input.focus();
+      var u = cleanUsername(input.value);
+      var r = await sb.from('profiles').upsert({ id: user.id, username: u, name: name });
+      if (r.error) { s.querySelector('#unErr').textContent = /duplicate|unique/i.test(r.error.message) ? '@' + u + ' was just taken. Try another.' : friendly(r.error); return; }
+      user.username = u; user.name = name; api.saveProfile(); closeSheet(); toast('Welcome, ' + name.split(' ')[0] + '!'); route();
+    };
+  }
+
+  /* ---------- profiles ---------- */
+  function boardCard(b, c, tag) {
+    c = c || { n: 0, img: '' };
+    return '<button class="bcard" type="button" data-bid="' + esc(b.id) + '"><span class="bimg' + (c.img ? '' : ' none') + '">' + (c.img ? '<img src="' + esc(c.img) + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : '') +
+      (tag ? '<span class="btag">' + tag + '</span>' : '') + '</span>' +
+      '<b>' + esc(b.name) + '</b><small>' + c.n + ' item' + (c.n === 1 ? '' : 's') + '</small></button>';
+  }
+  async function renderProfile(username) {
+    document.title = '@' + username + ' · Stashd';
+    var tabs = user ? tabbarHtml('profile') : '';
+    app.innerHTML = '<div class="home has-tabs">' + topbar() + '<p class="loading muted">Loading…</p></div>' + tabs; bindTopbar(); if (user) bindTabbar();
+    var pr = await sb.from('profiles').select('id,username,name').eq('username', cleanUsername(username)).maybeSingle();
+    if (pr.error || !pr.data) {
+      app.innerHTML = '<div class="home has-tabs">' + topbar() + '<div class="empty"><h2>No one here</h2><p>We couldn\'t find @' + esc(username) + '.</p></div></div>' + tabs; bindTopbar(); if (user) bindTabbar(); return;
+    }
+    var p = pr.data, me = user && user.id === p.id;
+    var q = await Promise.all([
+      sb.from('follows').select('follower_id', { count: 'exact', head: true }).eq('following_id', p.id),
+      sb.from('follows').select('following_id', { count: 'exact', head: true }).eq('follower_id', p.id),
+      user && !me ? sb.from('follows').select('follower_id').eq('follower_id', user.id).eq('following_id', p.id).maybeSingle() : Promise.resolve({ data: null }),
+      me ? Promise.resolve({ data: db.boards }) : sb.from('boards').select('id,name,visibility,created_at').eq('user_id', p.id).order('created_at')
+    ]);
+    var boards = q[3].data || [];
+    var shared = me ? (db.shared || []) : boards.filter(function (b) { return b.visibility !== 'public' && user && sharedBoard(b.id); });   // secret boards I was invited to
+    var mine = me ? boards : boards.filter(function (b) { return b.visibility === 'public'; });
+    var all = mine.concat(me ? shared : []), covers = {};
+    if (all.length) {
+      var it = await sb.from('items').select('board_id,image_url,created_at').in('board_id', all.map(function (b) { return b.id; })).order('created_at', { ascending: false }).limit(1000);
+      (it.data || []).forEach(function (i) { var c = covers[i.board_id] || (covers[i.board_id] = { n: 0, img: '' }); c.n++; if (!c.img && safeImg(i.image_url)) c.img = i.image_url; });
+    }
+    var following = !!q[2].data, nFollowers = q[0].count || 0;
+    function paint() {
+      app.innerHTML = '<div class="home has-tabs">' + topbar(me ? '<button class="icon soft" type="button" id="settingsBtn" aria-label="Settings">' + GEAR_SVG + '</button>' : '') +
+        '<section class="profile">' + avatar(p, 'big') + '<h1>' + esc(p.name || p.username) + '</h1><p class="muted">@' + esc(p.username) + '</p>' +
+          '<div class="counts"><button type="button" id="fwers"><b>' + nFollowers + '</b> follower' + (nFollowers === 1 ? '' : 's') + '</button><button type="button" id="fwing"><b>' + (q[1].count || 0) + '</b> following</button></div>' +
+          (me ? '<div class="row"><button class="btn" type="button" id="editP">Edit profile</button><button class="btn" type="button" id="shareP">Share profile</button></div>'
+            : user ? '<button class="btn ' + (following ? '' : 'primary') + ' follow" type="button" id="followBtn">' + (following ? 'Following' : 'Follow') + '</button>'
+            : '<button class="btn primary follow" type="button" id="joinBtn">Sign up to follow</button>') +
+        '</section>' +
+        '<h2 class="sec">' + (me ? 'Your boards' : 'Boards') + '</h2>' +
+        (mine.length ? '<section class="boards">' + mine.map(function (b) { return boardCard(b, covers[b.id], me && b.visibility !== 'public' ? LOCK + ' Secret' : ''); }).join('') + '</section>'
+          : '<p class="muted">' + (me ? 'No boards yet.' : 'No public boards yet.') + '</p>') +
+        (me ? '<p class="muted small" style="margin-top:.6rem">Other people only see your public boards, plus secret ones you invited them to.</p>' : '') +
+        (shared.length ? '<h2 class="sec">Shared with you</h2><section class="boards">' + shared.map(function (b) { return boardCard(b, covers[b.id], PEOPLE_SVG.replace(/22/g, '12') + ' Shared'); }).join('') + '</section>' : '') +
+      '</div>' + tabs;
+      bindTopbar(); if (user) bindTabbar();
+      document.getElementById('fwers').onclick = function () { openFollowList(p, 'followers'); };
+      document.getElementById('fwing').onclick = function () { openFollowList(p, 'following'); };
+      app.querySelectorAll('[data-bid]').forEach(function (b) { b.onclick = function () { nav({ b: b.dataset.bid }); }; });
+      var fb = document.getElementById('followBtn');
+      if (fb) fb.onclick = async function () {
+        fb.disabled = true;
+        var r = following ? await sb.from('follows').delete().eq('follower_id', user.id).eq('following_id', p.id)
+          : await sb.from('follows').insert({ follower_id: user.id, following_id: p.id });
+        if (r.error) { fb.disabled = false; return toast(friendly(r.error)); }
+        following = !following; nFollowers += following ? 1 : -1; paint();
+      };
+      var jb = document.getElementById('joinBtn'); if (jb) jb.onclick = function () { renderAuth('signup'); };
+      var ep = document.getElementById('editP'); if (ep) ep.onclick = openEditProfile;
+      var sp = document.getElementById('shareP'); if (sp) sp.onclick = function () { shareLink(base() + '?u=' + p.username, (p.name || p.username) + ' on Stashd'); };
+      var sb2 = document.getElementById('settingsBtn'); if (sb2) sb2.onclick = openMenu;
+    }
+    paint();
   }
 
   /* ---------- start ---------- */

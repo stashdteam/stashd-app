@@ -258,3 +258,7 @@ create policy "members: owner changes" on public.board_members for update to aut
 drop policy if exists "members: owner removes or leave" on public.board_members;
 create policy "members: owner removes or leave" on public.board_members for delete to authenticated
   using (public.board_role(board_id) = 'owner' or user_id = (select auth.uid()));
+
+-- ======================= Budget switches =======================
+alter table public.boards add column if not exists in_budget boolean not null default true;
+alter table public.items add column if not exists in_budget boolean not null default true;
