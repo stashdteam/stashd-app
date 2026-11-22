@@ -127,9 +127,51 @@
   function hasPending() { try { return !!sessionStorage.getItem(KEY.pending); } catch (e) { return false; } }
   function takePending() { try { var v = sessionStorage.getItem(KEY.pending); sessionStorage.removeItem(KEY.pending); return v; } catch (e) { return ''; } }
 
-  function renderAuth(mode, note) {
+  /* ---- validation ---- */
+  var EMAIL_RE = /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/;
+  var COMMON_PW = ['password', 'password1', 'password123', '12345678', '123456789', '1234567890', 'qwerty123', 'qwertyuiop', '11111111', '00000000',
+    'abc12345', 'abcd1234', 'iloveyou', 'iloveyou1', 'letmein1', 'welcome1', 'admin123', 'football1', 'princess1', 'sunshine1', 'monkey123',
+    '1q2w3e4r', 'q1w2e3r4', 'passw0rd', 'p@ssw0rd', 'stashd123', 'stashd2026', 'egypt123', 'cairo123', 'shopping1'];
+  var POPULAR_DOMAINS = ['gmail.com', 'hotmail.com', 'outlook.com', 'yahoo.com', 'icloud.com', 'live.com', 'me.com', 'msn.com'];
+  function editDist(a, b) {
+    var d = []; for (var i = 0; i <= a.length; i++) { d[i] = [i]; }
+    for (var j = 1; j <= b.length; j++) d[0][j] = j;
+    for (i = 1; i <= a.length; i++) for (j = 1; j <= b.length; j++)
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    return d[a.length][b.length];
+  }
+  function emailSuggestion(email) {
+    var at = email.lastIndexOf('@'); if (at < 1) return '';
+    var dom = email.slice(at + 1);
+    if (!dom || POPULAR_DOMAINS.indexOf(dom) >= 0) return '';
+    var best = '', bestD = 3;
+    POPULAR_DOMAINS.forEach(function (p) { var dd = editDist(dom, p); if (dd < bestD) { bestD = dd; best = p; } });
+    return best && bestD <= 2 ? email.slice(0, at + 1) + best : '';
+  }
+  function pwChecks(pw, email) {
+    var low = pw.toLowerCase(), local = (email.split('@')[0] || '').toLowerCase();
+    return {
+      len: pw.length >= 8 && pw.length <= 72,
+      mix: /[a-z]/i.test(pw) && /\d/.test(pw),
+      safe: pw.length > 0 && COMMON_PW.indexOf(low) < 0 && !(local.length >= 3 && low.indexOf(local) >= 0) && !/^(.)\1+$/.test(pw)
+    };
+  }
+  function pwStrength(pw) {
+    var s = 0;
+    if (pw.length >= 8) s++; if (pw.length >= 12) s++;
+    if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) s++;
+    if (/\d/.test(pw)) s++; if (/[^A-Za-z0-9]/.test(pw)) s++;
+    return s <= 2 ? 1 : s === 3 ? 2 : 3;
+  }
+
+  var GOOGLE_SVG = '<svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>';
+  var APPLE_SVG = '<svg width="17" height="20" viewBox="0 0 17 20" aria-hidden="true"><path fill="currentColor" d="M14.2 10.6c0-2.6 2.1-3.8 2.2-3.9-1.2-1.8-3.1-2-3.7-2-1.6-.2-3.1.9-3.9.9-.8 0-2-.9-3.4-.9C3.7 4.8 2 5.8 1.1 7.4c-1.9 3.2-.5 8 1.3 10.6.9 1.3 2 2.7 3.3 2.6 1.3-.1 1.8-.8 3.4-.8s2 .8 3.4.8c1.4 0 2.3-1.3 3.2-2.6 1-1.5 1.4-2.9 1.4-3-.1 0-2.9-1.1-2.9-4.4zM11.6 3c.7-.9 1.2-2 1.1-3.2-1 0-2.3.7-3 1.6-.7.8-1.2 2-1.1 3.1 1.1.1 2.3-.6 3-1.5z"/></svg>';
+
+  function providers() { var p = CFG.providers || {}; return CLOUD ? ['google', 'apple'].filter(function (k) { return p[k]; }) : []; }
+
+  function renderAuth(mode, note, prefill) {
     mode = mode || (!CLOUD && Object.keys(load(KEY.users, {})).length ? 'signin' : 'signup');
-    var up = mode === 'signup';
+    var up = mode === 'signup', prov = providers();
     document.title = 'Stashd · ' + (up ? 'Create account' : 'Sign in');
     app.innerHTML =
       '<main class="auth">' +
@@ -141,35 +183,96 @@
           '<button type="button" role="tab" data-mode="signup" aria-selected="' + up + '">Create account</button>' +
           '<button type="button" role="tab" data-mode="signin" aria-selected="' + !up + '">Sign in</button>' +
         '</div>' +
+        (prov.length ? '<div class="oauth">' +
+          (prov.indexOf('apple') >= 0 ? '<button class="btn block apple" type="button" data-oauth="apple">' + APPLE_SVG + (up ? 'Sign up' : 'Sign in') + ' with Apple</button>' : '') +
+          (prov.indexOf('google') >= 0 ? '<button class="btn block google" type="button" data-oauth="google">' + GOOGLE_SVG + (up ? 'Sign up' : 'Sign in') + ' with Google</button>' : '') +
+          '</div><p class="divider"><span>or with email</span></p>' : '') +
         '<form id="authForm" novalidate>' +
-          (up ? '<label class="field"><span>Name</span><input type="text" name="name" autocomplete="given-name" required></label>' : '') +
-          '<label class="field"><span>Email</span><input type="email" name="email" autocomplete="email" inputmode="email" required></label>' +
-          '<label class="field"><span>Password</span><input type="password" name="password" minlength="6" autocomplete="' + (up ? 'new-password' : 'current-password') + '" required></label>' +
-          (up ? '<label class="check"><input type="checkbox" name="news"><span>Email me Stashd news and launch updates. You can unsubscribe at any time. See our <a href="privacy.html">privacy policy</a>.</span></label>' : '') +
+          (up ? '<label class="field"><span>Name</span><input type="text" name="name" autocomplete="given-name" autocapitalize="words" maxlength="50" enterkeyhint="next" aria-describedby="nameErr" required><small class="ferr" id="nameErr"></small></label>' : '') +
+          '<label class="field"><span>Email</span><input type="email" name="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" maxlength="254" enterkeyhint="next" aria-describedby="emailErr" required value="' + esc(prefill || '') + '"><small class="ferr" id="emailErr"></small></label>' +
+          '<label class="field"><span>Password</span><span class="pw"><input type="password" name="password" maxlength="72" autocomplete="' + (up ? 'new-password' : 'current-password') + '" enterkeyhint="go" aria-describedby="pwErr' + (up ? ' pwRules' : '') + '" required>' +
+            '<button type="button" class="show" aria-label="Show password" aria-pressed="false">Show</button></span><small class="ferr" id="pwErr"></small></label>' +
+          (up ? '<div class="meter" aria-hidden="true"><i></i><i></i><i></i></div>' +
+            '<ul class="rules" id="pwRules" aria-live="polite">' +
+              '<li data-rule="len">At least 8 characters</li><li data-rule="mix">Letters and at least one number</li><li data-rule="safe">Not too easy to guess</li></ul>' : '') +
+          (up ? '<label class="check"><input type="checkbox" name="news"><span>Email me Stashd news and launch updates (optional). Unsubscribe any time.</span></label>' : '') +
           '<p class="err" id="authErr" role="alert"></p>' +
+          '<div id="authActions"></div>' +
           '<button class="btn primary block" type="submit">' + (up ? 'Create account' : 'Sign in') + '</button>' +
           (CLOUD && !up ? '<p style="text-align:center;margin-top:.75rem"><button class="link" type="button" id="forgotBtn">Forgot your password?</button></p>' : '') +
+          (up ? '<p class="fine" style="margin-top:.9rem">By creating an account, you agree to our <a href="privacy.html">privacy policy</a>.</p>' : '') +
         '</form>' +
         '<p class="fine">' + (CLOUD ? 'Your stash is saved to your account, so it\'s there on any device you sign in on.' : 'Test version: your account and stash are saved in this browser, on this device only.') + ' <a href="privacy.html">Privacy</a></p>' +
       '</main>';
 
-    app.querySelectorAll('[data-mode]').forEach(function (b) { b.onclick = function () { renderAuth(b.dataset.mode); }; });
+    app.querySelectorAll('[data-mode]').forEach(function (b) {
+      b.onclick = function () { renderAuth(b.dataset.mode, '', String(new FormData(document.getElementById('authForm')).get('email') || '').trim()); };
+    });
+    app.querySelectorAll('[data-oauth]').forEach(function (b) { b.onclick = function () { oauth(b.dataset.oauth, b); }; });
+
     var form = document.getElementById('authForm'), err = document.getElementById('authErr');
+    var f = { name: form.elements.name, email: form.elements.email, pw: form.elements.password };
+    var touched = {};
+    function setErr(input, id, msg) {
+      var el = document.getElementById(id);
+      el.innerHTML = msg || '';
+      if (msg) input.setAttribute('aria-invalid', 'true'); else input.removeAttribute('aria-invalid');
+      return !msg;
+    }
+    function checkName() {
+      if (!f.name) return true;
+      var v = f.name.value.trim();
+      return setErr(f.name, 'nameErr', !v ? 'Add your name.' : !/\p{L}/u.test(v) ? 'Use letters in your name.' : '');
+    }
+    function checkEmail(final) {
+      var v = f.email.value.trim().toLowerCase();
+      if (!v) return setErr(f.email, 'emailErr', 'Add your email.');
+      if (!EMAIL_RE.test(v)) return setErr(f.email, 'emailErr', 'That email doesn\'t look right. Check for typos.');
+      var sug = up && final !== 'quiet' ? emailSuggestion(v) : '';
+      setErr(f.email, 'emailErr', '');
+      if (sug) { document.getElementById('emailErr').innerHTML = '<span class="sug">Did you mean <button type="button" class="link" id="sugBtn">' + esc(sug) + '</button>?</span>'; document.getElementById('sugBtn').onclick = function () { f.email.value = sug; checkEmail(); }; }
+      return true;
+    }
+    function checkPw() {
+      var pw = f.pw.value;
+      if (!up) return setErr(f.pw, 'pwErr', pw ? '' : 'Add your password.');
+      var c = pwChecks(pw, f.email.value.trim());
+      app.querySelectorAll('[data-rule]').forEach(function (li) { li.classList.toggle('ok', !!c[li.dataset.rule]); });
+      var m = app.querySelector('.meter'); m.dataset.level = pw ? (c.len && c.mix && c.safe ? pwStrength(pw) : 1) : 0;
+      if (!pw) return setErr(f.pw, 'pwErr', 'Choose a password.');
+      if (pw.length > 72) return setErr(f.pw, 'pwErr', 'Keep it under 72 characters.');
+      return setErr(f.pw, 'pwErr', c.len && c.mix && c.safe ? '' : 'Your password needs to tick all three boxes below.');
+    }
+    [['name', checkName], ['email', checkEmail], ['pw', checkPw]].forEach(function (p) {
+      var el = f[p[0]]; if (!el) return;
+      el.addEventListener('blur', function () { if (el.value) { touched[p[0]] = true; p[1](); } });
+      el.addEventListener('input', function () {
+        if (p[0] === 'pw' && up) { var keep = touched.pw; checkPw(); if (!keep) setErr(f.pw, 'pwErr', ''); }
+        else if (touched[p[0]]) p[1]('quiet');
+        err.textContent = ''; document.getElementById('authActions').innerHTML = '';
+      });
+    });
+    var show = form.querySelector('.show');
+    show.onclick = function () {
+      var on = f.pw.type === 'password'; f.pw.type = on ? 'text' : 'password';
+      show.textContent = on ? 'Hide' : 'Show'; show.setAttribute('aria-pressed', on); show.setAttribute('aria-label', on ? 'Hide password' : 'Show password');
+    };
+
     form.onsubmit = async function (e) {
       e.preventDefault();
-      var fd = new FormData(form);
-      var email = String(fd.get('email') || '').trim().toLowerCase(), pw = String(fd.get('password') || ''), name = String(fd.get('name') || '').trim();
-      if (up && !name) return (err.textContent = 'Add your name.');
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return (err.textContent = 'That email doesn\'t look right.');
-      if (pw.length < 6) return (err.textContent = 'Use at least 6 characters for your password.');
-      if (CLOUD) return cloudAuth(up, name, email, pw, !!fd.get('news'), err, form.querySelector('[type=submit]'));
+      touched = { name: true, email: true, pw: true };
+      var ok = [checkName(), checkEmail('quiet'), checkPw()];
+      if (ok.indexOf(false) >= 0) { var bad = form.querySelector('[aria-invalid=true]'); if (bad) bad.focus(); return; }
+      var email = f.email.value.trim().toLowerCase(), pw = f.pw.value, name = f.name ? f.name.value.trim().replace(/\s+/g, ' ') : '';
+      var news = !!(form.elements.news && form.elements.news.checked);
+      if (CLOUD) return cloudAuth(up, name, email, pw, news, err, form.querySelector('[type=submit]'));
       var users = load(KEY.users, {});
       if (up) {
         if (users[email]) return (err.textContent = 'There\'s already an account with that email on this device. Sign in instead.');
         var salt = uid();
         users[email] = { id: uid(), name: name, email: email, salt: salt, hash: await hash(pw, salt), currency: 'EGP', created_at: new Date().toISOString() };
         if (!save(KEY.users, users)) return;
-        if (fd.get('news')) subscribeBrevo(email);
+        if (news) subscribeBrevo(email);
         signIn(users[email], 'Welcome to Stashd, ' + name + '!');
       } else {
         var u = users[email];
@@ -179,47 +282,104 @@
     };
     var fb = document.getElementById('forgotBtn');
     if (fb) fb.onclick = async function () {
-      var email = String(new FormData(form).get('email') || '').trim().toLowerCase();
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return (err.textContent = 'Type your email above first, then tap Forgot your password.');
+      touched.email = true;
+      if (!checkEmail('quiet')) { f.email.focus(); return (err.textContent = 'Type your email above first, then tap Forgot your password.'); }
       fb.disabled = true;
-      var r = await sb.auth.resetPasswordForEmail(email, { redirectTo: base() });
+      var r = await sb.auth.resetPasswordForEmail(f.email.value.trim().toLowerCase(), { redirectTo: base() });
       fb.disabled = false;
       if (r.error) return (err.textContent = friendly(r.error));
-      renderAuth('signin', 'Check your inbox for a link to set a new password.');
+      renderInbox(f.email.value.trim().toLowerCase(), 'reset');
     };
   }
 
+  function renderInbox(email, kind) {
+    var reset = kind === 'reset';
+    app.innerHTML = '<main class="auth"><h1 class="wm">Stash<span>d</span></h1>' +
+      '<h2 class="inbox-h">Check your inbox</h2>' +
+      '<p>We sent a link to <b>' + esc(email) + '</b>. Tap it to ' + (reset ? 'set a new password' : 'confirm your email and start stashing') + '.</p>' +
+      '<p class="muted" style="margin-top:.6rem">Can\'t find it? Look in Spam or Junk. It can take a minute.</p>' +
+      '<div class="stack"><button class="btn block" type="button" id="resendBtn">Send it again</button>' +
+      '<button class="btn primary block" type="button" id="toSignIn">Back to sign in</button>' +
+      '<button class="link" type="button" id="otherEmail">Use a different email</button></div>' +
+      '<p class="err" id="inboxErr" role="alert" style="margin-top:.75rem"></p></main>';
+    var rb = document.getElementById('resendBtn'), ie = document.getElementById('inboxErr');
+    function cooldown(s) {
+      rb.disabled = true; rb.textContent = 'Send it again (' + s + 's)';
+      var t = setInterval(function () { s--; if (s <= 0) { clearInterval(t); rb.disabled = false; rb.textContent = 'Send it again'; } else rb.textContent = 'Send it again (' + s + 's)'; }, 1000);
+    }
+    cooldown(60);
+    rb.onclick = async function () {
+      var r = reset ? await sb.auth.resetPasswordForEmail(email, { redirectTo: base() })
+        : await sb.auth.resend({ type: 'signup', email: email, options: { emailRedirectTo: base() } });
+      if (r.error) { ie.textContent = friendly(r.error); return; }
+      ie.textContent = ''; toast('Sent again'); cooldown(60);
+    };
+    document.getElementById('toSignIn').onclick = function () { renderAuth('signin', '', email); };
+    document.getElementById('otherEmail').onclick = function () { renderAuth(reset ? 'signin' : 'signup'); };
+  }
+
+  async function oauth(provider, btn) {
+    btn.disabled = true;
+    var r = await sb.auth.signInWithOAuth({ provider: provider, options: { redirectTo: base() } });
+    if (r.error) { btn.disabled = false; document.getElementById('authErr').textContent = friendly(r.error); }
+  }
+
   function friendly(e) {
-    var m = (e && e.message) || '';
-    if (/invalid login/i.test(m)) return 'Email or password is wrong.';
-    if (/not confirmed/i.test(m)) return 'Confirm your email first. The link is in your inbox.';
-    if (/already registered|already exists/i.test(m)) return 'There\'s already an account with that email. Sign in instead.';
-    if (/rate limit|too many/i.test(m)) return 'Too many tries. Wait a few minutes and try again.';
+    var m = (e && e.message) || '', code = (e && e.code) || '';
+    if (/invalid login|invalid_credentials/i.test(m + code)) return 'Email or password is wrong.';
+    if (/not confirmed|email_not_confirmed/i.test(m + code)) return 'Confirm your email first. The link is in your inbox.';
+    if (/already registered|already exists|user_already_exists/i.test(m + code)) return 'There\'s already an account with that email. Sign in instead.';
+    if (/weak_password|password should/i.test(m + code)) return 'That password is too weak. Use at least 8 characters with letters and a number.';
+    if (/rate limit|too many|over_email_send_rate_limit|over_request_rate_limit/i.test(m + code)) return 'Too many tries. Wait a few minutes and try again.';
+    if (/provider is not enabled|unsupported provider/i.test(m)) return 'That sign-in option isn\'t switched on yet.';
     if (/fetch|network/i.test(m)) return 'Can\'t reach Stashd. Check your connection.';
     return m || 'Something went wrong. Try again.';
   }
 
   async function cloudAuth(up, name, email, pw, news, err, btn) {
     btn.disabled = true; err.textContent = '';
+    var label = btn.textContent; btn.textContent = up ? 'Creating account…' : 'Signing in…';
+    var actions = document.getElementById('authActions');
     try {
       if (up) {
         var r = await sb.auth.signUp({ email: email, password: pw, options: { data: { name: name, currency: 'EGP' }, emailRedirectTo: base() } });
-        if (r.error) return (err.textContent = friendly(r.error));
+        if (r.error) { err.textContent = friendly(r.error); return; }
+        // Supabase hides whether an email is taken: an existing account comes back with no identities.
+        if (r.data.user && Array.isArray(r.data.user.identities) && r.data.user.identities.length === 0) {
+          err.textContent = 'There\'s already a Stashd account with this email.';
+          actions.innerHTML = '<div class="row" style="margin-bottom:.75rem"><button class="btn" type="button" id="goSignIn">Sign in</button><button class="btn" type="button" id="goReset">Reset password</button></div>';
+          document.getElementById('goSignIn').onclick = function () { renderAuth('signin', '', email); };
+          document.getElementById('goReset').onclick = async function () {
+            var x = await sb.auth.resetPasswordForEmail(email, { redirectTo: base() });
+            if (x.error) err.textContent = friendly(x.error); else renderInbox(email, 'reset');
+          };
+          return;
+        }
         if (news) subscribeBrevo(email);
         if (r.data.session) return startCloud(r.data.session.user, 'Welcome to Stashd, ' + name + '!');
-        renderAuth('signin', 'Almost there! We sent a link to ' + email + '. Tap it to confirm your email, then sign in.');
+        renderInbox(email, 'signup');
       } else {
         var s = await sb.auth.signInWithPassword({ email: email, password: pw });
-        if (s.error) return (err.textContent = friendly(s.error));
+        if (s.error) {
+          err.textContent = friendly(s.error);
+          if (/not confirmed|email_not_confirmed/i.test(s.error.message + (s.error.code || ''))) {
+            actions.innerHTML = '<button class="btn block" type="button" id="resendC" style="margin-bottom:.75rem">Resend confirmation email</button>';
+            document.getElementById('resendC').onclick = async function () {
+              var x = await sb.auth.resend({ type: 'signup', email: email, options: { emailRedirectTo: base() } });
+              if (x.error) err.textContent = friendly(x.error); else renderInbox(email, 'signup');
+            };
+          }
+          return;
+        }
         startCloud(s.data.user, 'Welcome back!');
       }
     } catch (e) { err.textContent = friendly(e); }
-    finally { btn.disabled = false; }
+    finally { if (document.body.contains(btn)) { btn.disabled = false; btn.textContent = label; } }
   }
 
   async function startCloud(au, msg) {
     var md = au.user_metadata || {};
-    user = { id: au.id, email: au.email, name: md.name || (au.email || '').split('@')[0], currency: md.currency || 'EGP' };
+    user = { id: au.id, email: au.email, name: md.name || md.full_name || md.given_name || (au.email || '').split('@')[0], currency: md.currency || 'EGP' };
     app.innerHTML = '<p class="boot loading" style="justify-content:center">Loading your stash…</p>';
     var res = await Promise.all([
       sb.from('boards').select('id,user_id,name,created_at').order('created_at'),

@@ -79,6 +79,8 @@ A plain HTML/CSS/JS web version of the MVP, published with GitHub Pages, for tes
 - Supabase JS is loaded from jsDelivr, pinned to @supabase/supabase-js@2.118.0.
 - `manifest.webmanifest`, `icons/`: installable on Android; `share_target` puts Stashd in the Android share menu. iPhone sharing uses a Shortcut that opens `?url=<link>`.
 - Link reading runs in the browser: Shopify `/products/<handle>.js` (Nesaa is Shopify), then the page's own meta tags, then the Microlink free API (title and photo only). Anything missing is filled in by hand. A Supabase edge function should replace this for reliability.
+- Sign-up rules (client side, mirror them in Supabase Auth settings): password 8–72 characters, letters and a number, not a common password or the email name; live checklist and strength bar; email typo suggestions; existing emails detected via empty `identities` from `signUp`; "Check your inbox" screen with resend.
+- Google / Apple sign-in buttons are built in and switched on with `providers` in `config.js` once each provider is configured in Supabase.
 - Newsletter opt-in on sign-up posts to the Brevo form (address is in `app.js`).
 - `privacy.html`: draft; contact email and date still to fill in.
 - `_config.yml` stops GitHub Pages from publishing this file.
