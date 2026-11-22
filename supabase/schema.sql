@@ -32,6 +32,12 @@ create table if not exists public.items (
 create index if not exists items_user_created_idx on public.items (user_id, created_at desc);
 create index if not exists items_board_idx on public.items (board_id);
 
+-- Let signed-in users use the tables (row-level security below still limits them to their own rows).
+-- Newer Supabase projects don't grant this automatically for tables made in the SQL editor.
+grant usage on schema public to authenticated;
+grant select, insert, update, delete on public.boards, public.items to authenticated;
+revoke all on public.boards, public.items from anon;
+
 -- Row-level security: everyone sees and changes only their own rows.
 alter table public.boards enable row level security;
 alter table public.items enable row level security;
