@@ -32,7 +32,7 @@
   function money(n, c) { return n == null ? '' : (c ? c + ' ' : '') + fmt(n); }
   function pct(it) { return (it.price != null && it.was_price != null && it.was_price > it.price) ? Math.round((it.was_price - it.price) / it.was_price * 100) : 0; }
   function hostBrand(url) { try { return new URL(url).hostname.replace(/^www\./, '').split('.')[0]; } catch (e) { return ''; } }
-  function boardName(id) { var b = db.boards.find(function (x) { return x.id === id; }); return b ? b.name : ''; }
+  function boardName(id) { var b = db.boards.find(function (x) { return x.id === id; }) || (db.shared || []).find(function (x) { return x.id === id; }); return b ? b.name : ''; }
   function persist() { return CLOUD ? true : save(KEY.data(user.id), db); }
   var toastTimer;
   function toast(msg) { toastEl.textContent = msg; toastEl.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 2600); }
@@ -51,7 +51,7 @@
     saveItem: function (it) { clearTimeout(saveTimers[it.id]); return CLOUD ? sb.from('items').upsert(row(it)).then(done, syncFail) : Promise.resolve(persist()); },
     saveItemSoon: function (it) { clearTimeout(saveTimers[it.id]); if (!CLOUD) return persist(); saveTimers[it.id] = setTimeout(function () { api.saveItem(it); }, 600); },
     deleteItem: function (id) { clearTimeout(saveTimers[id]); return CLOUD ? sb.from('items').delete().eq('id', id).then(done, syncFail) : Promise.resolve(persist()); },
-    saveBoard: function (b) { return CLOUD ? sb.from('boards').upsert({ id: b.id, user_id: b.user_id, name: b.name, created_at: b.created_at }).then(done, syncFail) : Promise.resolve(persist()); },
+    saveBoard: function (b) { return CLOUD ? sb.from('boards').upsert({ id: b.id, user_id: b.user_id, name: b.name, created_at: b.created_at, visibility: b.visibility || 'private', link_token: b.link_token || null }).then(done, syncFail) : Promise.resolve(persist()); },
     deleteBoard: function (id) { return CLOUD ? sb.from('boards').delete().eq('id', id).then(done, syncFail) : Promise.resolve(persist()); },
     saveProfile: function () {
       if (!CLOUD) { saveUser(); return Promise.resolve(true); }
@@ -84,18 +84,19 @@
   }
 
   /* ---------- sheets ---------- */
-  function sheet(html) {
+  function sheet(html, opts) {
     closeSheet();
+    var locked = opts && opts.locked;
     var o = document.createElement('div');
-    o.className = 'overlay';
-    o.innerHTML = '<div class="sheet" role="dialog" aria-modal="true"><button class="x" type="button" aria-label="Close">×</button>' + html + '</div>';
+    o.className = 'overlay' + (locked ? ' locked' : '');
+    o.innerHTML = '<div class="sheet" role="dialog" aria-modal="true">' + (locked ? '' : '<button class="x" type="button" aria-label="Close">×</button>') + html + '</div>';
     document.body.appendChild(o);
     document.body.classList.add('locked');
-    o.addEventListener('click', function (e) { if (e.target === o || e.target.closest('.x')) closeSheet(); });
+    if (!locked) o.addEventListener('click', function (e) { if (e.target === o || e.target.closest('.x')) closeSheet(); });
     return o.querySelector('.sheet');
   }
   function closeSheet() { document.querySelectorAll('.overlay').forEach(function (o) { o.remove(); }); document.body.classList.remove('locked'); }
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeSheet(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !document.querySelector('.overlay.locked')) closeSheet(); });
   // Broken product photos: fall back to the plain colour block.
   document.addEventListener('error', function (e) {
     var t = e.target;
@@ -189,6 +190,8 @@
           '</div><p class="divider"><span>or with email</span></p>' : '') +
         '<form id="authForm" novalidate>' +
           (up ? '<label class="field"><span>Name</span><input type="text" name="name" autocomplete="given-name" autocapitalize="words" maxlength="50" enterkeyhint="next" aria-describedby="nameErr" required><small class="ferr" id="nameErr"></small></label>' : '') +
+          (up && CLOUD ? '<label class="field"><span>Username</span><span class="at"><input type="text" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="20" enterkeyhint="next" aria-describedby="unErr unHelp" required></span>' +
+            '<small class="ferr" id="unErr"></small><small class="fok" id="unOk"></small><small class="help" id="unHelp">How friends find you. Letters, numbers, dots and underscores.</small></label>' : '') +
           '<label class="field"><span>Email</span><input type="email" name="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" maxlength="254" enterkeyhint="next" aria-describedby="emailErr" required value="' + esc(prefill || '') + '"><small class="ferr" id="emailErr"></small></label>' +
           '<label class="field"><span>Password</span><span class="pw"><input type="password" name="password" maxlength="72" autocomplete="' + (up ? 'new-password' : 'current-password') + '" enterkeyhint="go" aria-describedby="pwErr' + (up ? ' pwRules' : '') + '" required>' +
             '<button type="button" class="show" aria-label="Show password" aria-pressed="false">Show</button></span><small class="ferr" id="pwErr"></small></label>' +
@@ -213,6 +216,18 @@
     var form = document.getElementById('authForm'), err = document.getElementById('authErr');
     var f = { name: form.elements.name, email: form.elements.email, pw: form.elements.password };
     var touched = {};
+    var un = form.elements.username, unState = un ? bindUsername(un, document.getElementById('unErr'), document.getElementById('unOk')) : null, unEdited = false;
+    if (un) {
+      un.addEventListener('input', function () { unEdited = true; });
+      f.name.addEventListener('blur', function () {
+        setTimeout(function () {
+          var sug = suggestUsername(f.name.value);
+          if (unEdited || un.value || !sug) return;
+          if (document.activeElement === un) un.placeholder = sug;   // don't type into the box they're about to type in
+          else { un.value = sug; unState.check(); }
+        }, 0);
+      });
+    }
     function setErr(input, id, msg) {
       var el = document.getElementById(id);
       el.innerHTML = msg || '';
@@ -261,11 +276,13 @@
     form.onsubmit = async function (e) {
       e.preventDefault();
       touched = { name: true, email: true, pw: true };
-      var ok = [checkName(), checkEmail('quiet'), checkPw()];
+      var btn0 = form.querySelector('[type=submit]');
+      var ok = [checkName(), unState ? await unState.check() : true, checkEmail('quiet'), checkPw()];
       if (ok.indexOf(false) >= 0) { var bad = form.querySelector('[aria-invalid=true]'); if (bad) bad.focus(); return; }
+      var username = un ? cleanUsername(un.value) : '';
       var email = f.email.value.trim().toLowerCase(), pw = f.pw.value, name = f.name ? f.name.value.trim().replace(/\s+/g, ' ') : '';
       var news = !!(form.elements.news && form.elements.news.checked);
-      if (CLOUD) return cloudAuth(up, name, email, pw, news, err, form.querySelector('[type=submit]'));
+      if (CLOUD) return cloudAuth(up, name, email, pw, news, err, btn0, username);
       var users = load(KEY.users, {});
       if (up) {
         if (users[email]) return (err.textContent = 'There\'s already an account with that email on this device. Sign in instead.');
@@ -336,13 +353,13 @@
     return m || 'Something went wrong. Try again.';
   }
 
-  async function cloudAuth(up, name, email, pw, news, err, btn) {
+  async function cloudAuth(up, name, email, pw, news, err, btn, username) {
     btn.disabled = true; err.textContent = '';
     var label = btn.textContent; btn.textContent = up ? 'Creating account…' : 'Signing in…';
     var actions = document.getElementById('authActions');
     try {
       if (up) {
-        var r = await sb.auth.signUp({ email: email, password: pw, options: { data: { name: name, currency: 'EGP' }, emailRedirectTo: base() } });
+        var r = await sb.auth.signUp({ email: email, password: pw, options: { data: { name: name, username: username || undefined, currency: 'EGP' }, emailRedirectTo: base() } });
         if (r.error) { err.textContent = friendly(r.error); return; }
         // Supabase hides whether an email is taken: an existing account comes back with no identities.
         if (r.data.user && Array.isArray(r.data.user.identities) && r.data.user.identities.length === 0) {
@@ -381,23 +398,36 @@
     var md = au.user_metadata || {};
     user = { id: au.id, email: au.email, name: md.name || md.full_name || md.given_name || (au.email || '').split('@')[0], currency: md.currency || 'EGP' };
     app.innerHTML = '<p class="boot loading" style="justify-content:center">Loading your stash…</p>';
+    var BCOLS = 'id,user_id,name,visibility,link_token,created_at';
     var res = await Promise.all([
-      sb.from('boards').select('id,user_id,name,created_at').order('created_at'),
-      sb.from('items').select('*').order('created_at', { ascending: false })
-    ]).catch(function (e) { return [{ error: e }, {}]; });
-    if (res[0].error || res[1].error) {
-      var e = res[0].error || res[1].error;
+      sb.from('boards').select(BCOLS).eq('user_id', au.id).order('created_at'),
+      sb.from('profiles').select('username,name').eq('id', au.id).maybeSingle(),
+      sb.from('board_members').select('role,b:boards(' + BCOLS + ')').eq('user_id', au.id)
+    ]).catch(function (e) { return [{ error: e }, {}, {}]; });
+    var ownIds = (res[0].data || []).map(function (b) { return b.id; });
+    var itemsRes = res[0].error ? {} : await sb.from('items').select('*')
+      .or('user_id.eq.' + au.id + (ownIds.length ? ',board_id.in.(' + ownIds.join(',') + ')' : '')).order('created_at', { ascending: false });
+    if (res[0].error || itemsRes.error) {
+      var e = res[0].error || itemsRes.error;
       app.innerHTML = '<div class="empty"><h2>Couldn\'t load your stash</h2><p>' + esc(friendly(e)) + '</p><button class="btn primary" id="retry" type="button">Try again</button></div>';
       document.getElementById('retry').onclick = function () { startCloud(au, msg); };
       return;
     }
-    db = { boards: res[0].data, items: res[1].data };
+    if (res[1].data) { user.username = res[1].data.username || ''; if (res[1].data.name) user.name = res[1].data.name; }
+    var shared = (res[2].data || []).filter(function (m) { return m.b; }).map(function (m) { return Object.assign({}, m.b, { role: m.role }); });
+    if (shared.length) {
+      var owners = await sb.from('profiles').select('id,username,name').in('id', shared.map(function (b) { return b.user_id; }));
+      shared.forEach(function (b) { b.owner = (owners.data || []).find(function (o) { return o.id === b.user_id; }) || null; });
+    }
+    db = { boards: res[0].data, items: itemsRes.data, shared: shared };
+    cache = {};
     if (!db.boards.length) {
       var seed = [newBoard('Outfits', 0), newBoard('Gifts', 1)];
-      var ins = await sb.from('boards').insert(seed).select('id,user_id,name,created_at');
+      var ins = await sb.from('boards').insert(seed).select(BCOLS);
       db.boards = ins.error ? [] : ins.data;
     }
     afterSignIn(msg);
+    ensureUsername();
   }
 
   function localStashes() {
@@ -453,23 +483,27 @@
   }
   function afterSignIn(msg) {
     ui = { board: 'all', tab: 'tobuy' };
-    renderHome();
+    route();
     var p = takePending();
     if (p) openSave(p); else if (msg) toast(msg);
   }
   async function signOut() {
     if (CLOUD) { try { await sb.auth.signOut(); } catch (e) {} }
     else { try { localStorage.removeItem(KEY.session); } catch (e) {} }
-    user = db = null; closeSheet(); renderAuth('signin');
+    user = db = null; cache = {}; closeSheet(); history.replaceState(null, '', location.pathname); renderAuth('signin');
   }
   function saveUser() { var users = load(KEY.users, {}); users[user.email] = user; save(KEY.users, users); }
-  function newBoard(name, n) { return { id: uid(), user_id: user.id, name: name, created_at: new Date(Date.now() + (n || 0)).toISOString() }; }
+  function newBoard(name, n) { return { id: uid(), user_id: user.id, name: name, visibility: 'private', link_token: null, created_at: new Date(Date.now() + (n || 0)).toISOString() }; }
 
   /* ---------- home ---------- */
   function renderHome() {
     document.title = 'Stashd';
     if (ui.board !== 'all' && !boardName(ui.board)) ui.board = 'all';
-    var inBoard = ui.board === 'all' ? db.items : db.items.filter(function (i) { return i.board_id === ui.board; });
+    var shBoard = CLOUD && sharedBoard(ui.board), ownIds = db.boards.map(function (b) { return b.id; });
+    if (shBoard && !cache[ui.board]) { cache[ui.board] = null; loadShared(ui.board); }
+    var inBoard = shBoard ? (cache[ui.board] || [])
+      : ui.board === 'all' ? db.items.filter(function (i) { return !i.board_id || ownIds.indexOf(i.board_id) >= 0; })
+      : db.items.filter(function (i) { return i.board_id === ui.board; });
     var toBuy = inBoard.filter(function (i) { return !i.bought; }), bought = inBoard.filter(function (i) { return i.bought; });
     var list = (ui.tab === 'bought' ? bought : toBuy).slice().sort(function (a, b) { return (b.created_at || '').localeCompare(a.created_at || ''); });
 
@@ -477,12 +511,14 @@
       '<div class="home">' +
         '<header class="top"><h1 class="wm">Stash<span>d</span></h1><div class="actions">' +
           '<button class="icon add" id="addBtn" type="button" aria-label="Add a link">+</button>' +
+          (CLOUD ? '<button class="icon me" id="peopleBtn" type="button" aria-label="Find people">' + PEOPLE_SVG + '</button>' : '') +
           '<button class="icon me" id="meBtn" type="button" aria-label="Account and settings">' + esc((user.name || '?').charAt(0).toUpperCase()) + '</button>' +
         '</div></header>' +
         '<nav class="chips" aria-label="Boards">' +
           '<button class="chip" type="button" data-board="all" aria-pressed="' + (ui.board === 'all') + '">All</button>' +
-          db.boards.map(function (b) { return '<button class="chip" type="button" data-board="' + esc(b.id) + '" aria-pressed="' + (ui.board === b.id) + '">' + esc(b.name) + '</button>'; }).join('') +
-          (ui.board !== 'all' ? '<button class="chip ghost" type="button" id="editBoard">Edit board</button>' : '') +
+          db.boards.map(function (b) { return '<button class="chip" type="button" data-board="' + esc(b.id) + '" aria-pressed="' + (ui.board === b.id) + '">' + (CLOUD && b.visibility !== 'public' ? LOCK + ' ' : '') + esc(b.name) + '</button>'; }).join('') +
+          (db.shared || []).map(function (b) { return '<button class="chip shared" type="button" title="Shared by @' + esc((b.owner && b.owner.username) || '') + '" data-board="' + esc(b.id) + '" aria-pressed="' + (ui.board === b.id) + '">' + PEOPLE_SVG.replace(/22/g, '14') + ' ' + esc(b.name) + '</button>'; }).join('') +
+          (ui.board !== 'all' ? '<button class="chip ghost" type="button" id="editBoard">' + (shBoard ? 'Board info' : CLOUD ? 'Board settings' : 'Edit board') + '</button>' : '') +
           '<button class="chip ghost" type="button" id="newBoardBtn">+ Board</button>' +
         '</nav>' +
         '<div class="seg" role="tablist">' +
@@ -491,13 +527,16 @@
         '</div>' +
         (CLOUD && localStashes().length ? '<div class="hint" style="margin:0 0 1rem">You have items from the test version saved on this device. <div class="row" style="margin-top:.6rem"><button class="btn primary" type="button" id="importBtn">Move them to my account</button><button class="btn" type="button" id="importNo">No thanks</button></div></div>' : '') +
         '<div class="sum"><span class="muted">' + (ui.tab === 'bought' ? 'Spent' : 'Left to spend') + '</span><strong>' + esc(totals(ui.tab === 'bought' ? bought : toBuy, user.currency)) + '</strong></div>' +
-        (list.length ? '<section class="grid">' + list.map(cardHtml).join('') + '</section>' : emptyHtml()) +
+        (shBoard ? '<p class="muted small" style="margin:-.4rem 0 .9rem">Shared by @' + esc((shBoard.owner && shBoard.owner.username) || '') + ' · ' + (shBoard.role === 'editor' ? 'you can add' : 'view only') + '</p>' : '') +
+        (shBoard && cache[ui.board] === null ? '<p class="loading muted">Loading…</p>' : list.length ? '<section class="grid">' + list.map(cardHtml).join('') + '</section>' : shBoard ? '<div class="empty"><p>Nothing here yet.</p></div>' : emptyHtml()) +
       '</div>';
 
     document.getElementById('addBtn').onclick = openAdd;
     document.getElementById('meBtn').onclick = openMenu;
     document.getElementById('newBoardBtn').onclick = function () { promptBoard(function (b) { ui.board = b.id; renderHome(); }); };
-    var eb = document.getElementById('editBoard'); if (eb) eb.onclick = openBoardEdit;
+    var eb = document.getElementById('editBoard');
+    if (eb) eb.onclick = function () { if (shBoard) return openBoardInfo(shBoard); if (!CLOUD) return openBoardEdit(); var b = db.boards.find(function (x) { return x.id === ui.board; }); if (b) openBoardSettings(b); };
+    var pb = document.getElementById('peopleBtn'); if (pb) pb.onclick = openPeople;
     app.querySelectorAll('[data-board]').forEach(function (b) { b.onclick = function () { ui.board = b.dataset.board; renderHome(); }; });
     app.querySelectorAll('[data-tab]').forEach(function (b) { b.onclick = function () { ui.tab = b.dataset.tab; renderHome(); }; });
     app.querySelectorAll('.card').forEach(function (c) { c.onclick = function () { openItem(c.dataset.id); }; });
@@ -548,7 +587,8 @@
     };
   }
   function boardChips(it) {
-    return '<div class="chips wrap" data-role="boards">' + db.boards.map(function (b) {
+    var opts = db.boards.concat((db.shared || []).filter(function (b) { return b.role === 'editor'; }));
+    return '<div class="chips wrap" data-role="boards">' + opts.map(function (b) {
       return '<button class="chip" type="button" data-pick-board="' + esc(b.id) + '" aria-pressed="' + (it.board_id === b.id) + '">' + esc(b.name) + '</button>';
     }).join('') + '<button class="chip ghost" type="button" data-new-board>+ New</button></div>';
   }
@@ -750,7 +790,7 @@
   async function openSave(url) {
     var dupe = db.items.find(function (i) { return i.url === url; });
     var it = {
-      id: uid(), user_id: user.id, board_id: ui.board !== 'all' ? ui.board : (db.boards[0] ? db.boards[0].id : null),
+      id: uid(), user_id: user.id, board_id: ['owner', 'editor'].indexOf(roleOf(ui.board)) >= 0 ? ui.board : (db.boards[0] ? db.boards[0].id : null),
       url: url, title: '', brand: hostBrand(url), image_url: '', price: null, was_price: null, currency: user.currency || 'EGP',
       size: '', note: '', sold_out: false, bought: false, created_at: '', sizes: []
     };
@@ -781,19 +821,25 @@
       btn.disabled = true; btn.textContent = 'Stashing…';
       db.items.push(it);
       if (!(await api.saveItem(it))) { db.items.pop(); btn.disabled = false; btn.textContent = 'Stash it'; return; }
-      closeSheet(); ui.tab = 'tobuy'; renderHome();
+      if (it.board_id && cache[it.board_id]) cache[it.board_id].unshift(it);
+      if (location.search) history.replaceState(null, '', location.pathname);
+      closeSheet(); ui.tab = 'tobuy'; if (it.board_id && roleOf(it.board_id) === 'editor') ui.board = it.board_id; renderHome();
       toast('Saved' + (it.board_id ? ' to ' + boardName(it.board_id) : '') + ' · just now');
     };
   }
 
   /* ---------- item ---------- */
   function openItem(id) {
-    var it = db.items.find(function (i) { return i.id === id; }); if (!it) return;
+    var it = db.items.find(function (i) { return i.id === id; });
+    if (!it) Object.keys(cache).some(function (k) { it = (cache[k] || []).find(function (i) { return i.id === id; }); return it; });
+    if (!it) return;
+    if (CLOUD && !canEditItem(it)) return openItemView(it);
+    var mine = it.user_id === user.id, canDelete = mine || roleOf(it.board_id) === 'owner';
     var img = safeImg(it.image_url);
     var s = sheet(
       '<div class="hero-img' + (img ? '' : ' none') + '" id="iHero">' + (img ? '<img src="' + esc(img) + '" alt="" referrerpolicy="no-referrer">' : letter(it)) + tagsHtml(it) + '</div>' +
       '<div id="iHead"></div>' +
-      '<h3>Board</h3>' + boardChips(it) + sizeHtml(it) +
+      (mine ? '<h3>Board</h3>' + boardChips(it) : '') + sizeHtml(it) +
       '<label class="field" style="margin-top:1rem"><span>Note</span><textarea data-f="note" maxlength="300" placeholder="Add a note">' + esc(it.note) + '</textarea></label>' +
       '<label class="switch"><span>Sold out</span><input type="checkbox" role="switch" id="soldSw"' + (it.sold_out ? ' checked' : '') + '><i aria-hidden="true"></i></label>' +
       '<div class="stack">' +
@@ -801,7 +847,7 @@
         (safeLink(it.url) ? '<a class="btn block" id="openStore" href="' + esc(safeLink(it.url)) + '" target="_blank" rel="noopener noreferrer">Open store page</a>' : '') +
       '</div>' +
       detailsHtml(it, false) +
-      '<div class="stack"><button class="link danger" type="button" id="delBtn">Delete item</button></div>');
+      (canDelete ? '<div class="stack"><button class="link danger" type="button" id="delBtn">Delete item</button></div>' : ''));
     var head = s.querySelector('#iHead'), hero = s.querySelector('#iHero'), bb = s.querySelector('#boughtBtn');
     function paint() {
       head.innerHTML = '<h2 style="margin-right:0">' + esc(it.title || 'Untitled item') + '</h2>' +
@@ -819,16 +865,20 @@
     bindBoardChips(s, it, change); bindSize(s, it, change); bindFields(s, it, change);
     s.querySelector('#soldSw').onchange = function (e) { it.sold_out = e.target.checked; change(); };
     bb.onclick = function () { it.bought = !it.bought; api.saveItem(it); closeSheet(); renderHome(); toast(it.bought ? 'Marked as bought. Enjoy it!' : 'Moved back to To buy'); };
-    s.querySelector('#delBtn').onclick = function () {
+    var del = s.querySelector('#delBtn');
+    if (del) del.onclick = function () {
       if (!confirm('Delete "' + (it.title || 'this item') + '"?')) return;
-      db.items = db.items.filter(function (i) { return i.id !== it.id; }); api.deleteItem(it.id); closeSheet(); renderHome(); toast('Item deleted');
+      db.items = db.items.filter(function (i) { return i.id !== it.id; });
+      Object.keys(cache).forEach(function (k) { if (cache[k]) cache[k] = cache[k].filter(function (i) { return i.id !== it.id; }); });
+      api.deleteItem(it.id); closeSheet(); renderHome(); toast('Item deleted');
     };
   }
   function safeLink(u) { return /^https?:\/\//i.test(u || '') ? u : ''; }
 
   /* ---------- account menu + share setup ---------- */
   function openMenu() {
-    var s = sheet('<h2>' + esc(user.name) + '</h2><p class="muted" style="margin-top:-.6rem;margin-bottom:1rem">' + esc(user.email) + '</p>' +
+    var s = sheet('<h2>' + esc(user.name) + '</h2><p class="muted" style="margin-top:-.6rem;margin-bottom:1rem">' + (user.username ? '@' + esc(user.username) + ' · ' : '') + esc(user.email) + '</p>' +
+      (CLOUD ? '<div class="row" style="margin-bottom:1rem"><button class="btn" type="button" id="mProfile">My profile</button><button class="btn" type="button" id="mPeople">Find people</button></div>' : '') +
       '<label class="field"><span>Default currency</span><select id="curSel">' + CURRENCIES.map(function (c) { return '<option' + (c === user.currency ? ' selected' : '') + '>' + c + '</option>'; }).join('') + '</select></label>' +
       '<div class="stack">' +
         '<button class="btn block" type="button" id="mSetup">Set up Share to Stashd</button>' +
@@ -838,6 +888,8 @@
       '</div><p class="fine">' + (CLOUD ? 'Your stash is synced to your account.' : 'Test version. Everything is saved in this browser only.') + '</p>');
     s.querySelector('#curSel').onchange = function (e) { user.currency = e.target.value; api.saveProfile(); renderHome(); toast('New items will use ' + user.currency); };
     s.querySelector('#mSetup').onclick = openSetup;
+    var mp = s.querySelector('#mProfile'); if (mp) mp.onclick = function () { if (user.username) nav({ u: user.username }); else ensureUsername(); };
+    var mpe = s.querySelector('#mPeople'); if (mpe) mpe.onclick = openPeople;
     s.querySelector('#mOut').onclick = signOut;
     s.querySelector('#mDel').onclick = function () {
       if (!confirm('Delete your account and everything in your stash on this device? This can\'t be undone.')) return;
@@ -890,6 +942,349 @@
     };
   }
 
+  /* ---------- social: usernames, profiles, follows, shared boards ---------- */
+  var USERNAME_RE = /^[a-z0-9_.]{3,20}$/;
+  var PEOPLE_SVG = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><circle cx="17" cy="9" r="2.5"/><path d="M16.5 14.6c2.6.2 4.4 1.9 5 4.9"/></svg>';
+  var LOCK = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
+  var cache = {};   // items of boards shared with me, by board id
+
+  function cleanUsername(v) { return String(v || '').trim().replace(/^@/, '').toLowerCase(); }
+  function suggestUsername(name) { return cleanUsername(name).normalize('NFKD').replace(/[^a-z0-9]+/g, '').slice(0, 16); }
+  async function usernameStatus(u) {
+    if (!u) return 'Pick a username.';
+    if (u.length < 3) return 'At least 3 characters.';
+    if (u.length > 20) return '20 characters at most.';
+    if (!USERNAME_RE.test(u)) return 'Use only lowercase letters, numbers, dots and underscores.';
+    if (/^[._]|[._]$|\.\./.test(u)) return 'Can\'t start or end with a dot or underscore.';
+    var r = await sb.rpc('username_available', { u: u });
+    if (r.error) return '';
+    return r.data ? '' : '@' + u + ' is taken. Try another.';
+  }
+  function bindUsername(input, errEl, okEl) {
+    var t, seq = 0, state = { ok: false, pending: null };
+    function run() {
+      var my = ++seq, u = cleanUsername(input.value);
+      if (input.value !== u && u === input.value.toLowerCase().trim().replace(/^@/, '')) input.value = u;
+      state.ok = false;
+      state.pending = usernameStatus(u).then(function (msg) {
+        if (my !== seq) return state.pending;
+        errEl.textContent = msg; if (okEl) okEl.textContent = msg || !u ? '' : '@' + u + ' is free';
+        if (msg) input.setAttribute('aria-invalid', 'true'); else input.removeAttribute('aria-invalid');
+        state.ok = !msg; return state.ok;
+      });
+      return state.pending;
+    }
+    input.addEventListener('input', function () { clearTimeout(t); if (okEl) okEl.textContent = ''; t = setTimeout(run, 350); });
+    state.check = function () { clearTimeout(t); return run(); };
+    return state;
+  }
+
+  function roleOf(bid) {
+    if (!bid) return null;
+    if (db.boards.some(function (b) { return b.id === bid; })) return 'owner';
+    var s = (db.shared || []).find(function (b) { return b.id === bid; });
+    return s ? s.role : null;
+  }
+  function sharedBoard(bid) { return (db.shared || []).find(function (b) { return b.id === bid; }); }
+  function canEditItem(it) { return it.user_id === user.id || ['owner', 'editor'].indexOf(roleOf(it.board_id)) >= 0; }
+  function boardLink(b) { return base() + '?b=' + b.id + (b.visibility !== 'public' && b.link_token ? '&k=' + b.link_token : ''); }
+  function shareLink(url, title) {
+    if (navigator.share) return navigator.share({ title: title, url: url }).catch(function () {});
+    (navigator.clipboard ? navigator.clipboard.writeText(url) : Promise.reject()).then(function () { toast('Link copied'); })
+      .catch(function () { window.prompt('Copy this link', url); });
+  }
+  function avatar(p, cls) { return '<span class="av' + (cls ? ' ' + cls : '') + '" aria-hidden="true">' + esc(((p && (p.name || p.username)) || '?').charAt(0).toUpperCase()) + '</span>'; }
+  function personRow(p, extra) {
+    return '<button class="person" type="button" data-user="' + esc(p.username || '') + '">' + avatar(p) +
+      '<span><b>' + esc(p.name || p.username) + '</b><small>@' + esc(p.username || '') + '</small></span>' + (extra || '') + '</button>';
+  }
+  function bindPeople(root) {
+    root.querySelectorAll('[data-user]').forEach(function (b) { b.onclick = function () { if (b.dataset.user) { closeSheet(); nav({ u: b.dataset.user }); } }; });
+  }
+
+  /* routing: ?u=username (profile), ?b=board[&k=key] (board link) */
+  var navDepth = 0;
+  function nav(params) {
+    var q = new URLSearchParams(params || {}).toString();
+    history.pushState(null, '', location.pathname + (q ? '?' + q : '')); navDepth++;
+    route();
+  }
+  function goHome() { if (location.search) { history.pushState(null, '', location.pathname); navDepth++; } route(); }
+  function route() {
+    closeSheet();
+    var p = new URLSearchParams(location.search);
+    if (CLOUD && p.get('u')) return renderProfile(p.get('u'));
+    if (CLOUD && p.get('b')) return renderBoardPage(p.get('b'), p.get('k'));
+    if (user) return renderHome();
+    renderAuth();
+  }
+  window.addEventListener('popstate', function () { navDepth = Math.max(0, navDepth - 1); if (user || CLOUD) route(); });
+
+  function topbar(title) {
+    return '<header class="top sub"><button class="icon back" type="button" id="backBtn" aria-label="Back">‹</button>' +
+      '<a class="wm small" href="./" id="homeLink">Stash<span>d</span></a>' + (title || '<span style="width:2.75rem"></span>') + '</header>';
+  }
+  function bindTopbar() {
+    document.getElementById('backBtn').onclick = function () { if (navDepth > 0) history.back(); else goHome(); };
+    document.getElementById('homeLink').onclick = function (e) { e.preventDefault(); goHome(); };
+  }
+
+  async function ensureUsername() {
+    if (user.username) return;
+    var sug = suggestUsername(user.name);
+    var s = sheet('<h2>Pick a username</h2><p class="muted" style="margin-bottom:1rem">It\'s how friends find you, follow you and add you to boards.</p>' +
+      '<form id="unForm" novalidate><label class="field"><span>Username</span><span class="at"><input type="text" name="username" autocapitalize="off" autocomplete="username" spellcheck="false" maxlength="20" value="' + esc(sug) + '"></span>' +
+      '<small class="ferr" id="unErr"></small><small class="fok" id="unOk"></small></label><button class="btn primary block" type="submit">Save</button></form>', { locked: true });
+    var input = s.querySelector('[name=username]'), st = bindUsername(input, s.querySelector('#unErr'), s.querySelector('#unOk'));
+    if (sug) st.check();
+    s.querySelector('#unForm').onsubmit = async function (e) {
+      e.preventDefault();
+      if (!(await st.check())) return input.focus();
+      var u = cleanUsername(input.value);
+      var r = await sb.from('profiles').upsert({ id: user.id, username: u, name: user.name });
+      if (r.error) { s.querySelector('#unErr').textContent = /duplicate|unique/i.test(r.error.message) ? '@' + u + ' was just taken. Try another.' : friendly(r.error); return; }
+      user.username = u; closeSheet(); toast('Hi @' + u + '!'); route();
+    };
+  }
+
+  function openEditProfile() {
+    var s = sheet('<h2>Edit profile</h2><form id="epForm" novalidate>' +
+      '<label class="field"><span>Name</span><input type="text" name="name" maxlength="50" value="' + esc(user.name) + '"></label>' +
+      '<label class="field"><span>Username</span><span class="at"><input type="text" name="username" autocapitalize="off" spellcheck="false" maxlength="20" value="' + esc(user.username || '') + '"></span><small class="ferr" id="unErr"></small><small class="fok" id="unOk"></small></label>' +
+      '<p class="err" id="epErr"></p><button class="btn primary block" type="submit">Save</button></form>');
+    var input = s.querySelector('[name=username]'), st = bindUsername(input, s.querySelector('#unErr'), s.querySelector('#unOk'));
+    s.querySelector('#epForm').onsubmit = async function (e) {
+      e.preventDefault();
+      var name = s.querySelector('[name=name]').value.trim().replace(/\s+/g, ' '), u = cleanUsername(input.value);
+      if (!name) return (s.querySelector('#epErr').textContent = 'Add your name.');
+      if (u !== user.username && !(await st.check())) return input.focus();
+      var r = await sb.from('profiles').update({ name: name, username: u }).eq('id', user.id);
+      if (r.error) return (s.querySelector('#epErr').textContent = /duplicate|unique/i.test(r.error.message) ? '@' + u + ' is taken.' : friendly(r.error));
+      user.name = name; user.username = u; api.saveProfile(); closeSheet(); toast('Profile saved'); route();
+    };
+  }
+
+  function openPeople() {
+    var s = sheet('<h2>Find people</h2><label class="field"><span class="sr">Search</span><input type="search" id="pq" placeholder="Search by name or @username" autocapitalize="off" spellcheck="false" enterkeyhint="search"></label><div id="pres" class="people"></div>');
+    var q = s.querySelector('#pq'), res = s.querySelector('#pres'), t, seq = 0;
+    setTimeout(function () { q.focus(); }, 60);
+    q.oninput = function () {
+      clearTimeout(t);
+      t = setTimeout(async function () {
+        var v = q.value.trim().replace(/^@/, '').replace(/[,()%*\\]/g, '');
+        if (v.length < 2) { res.innerHTML = ''; return; }
+        var my = ++seq;
+        var r = await sb.from('profiles').select('id,username,name').not('username', 'is', null).neq('id', user ? user.id : '00000000-0000-0000-0000-000000000000')
+          .or('username.ilike.' + v.toLowerCase() + '%,name.ilike.%' + v + '%').limit(20);
+        if (my !== seq) return;
+        res.innerHTML = r.error ? '<p class="err">' + esc(friendly(r.error)) + '</p>' : r.data.length ? r.data.map(function (p) { return personRow(p); }).join('') : '<p class="muted">No one found.</p>';
+        bindPeople(res);
+      }, 250);
+    };
+  }
+
+  async function openFollowList(p, kind) {
+    var followers = kind === 'followers';
+    var s = sheet('<h2>' + (followers ? 'Followers' : 'Following') + '</h2><div class="people"><p class="loading muted">Loading…</p></div>');
+    var r = await sb.from('follows').select(followers ? 'p:profiles!follows_follower_id_fkey(id,username,name)' : 'p:profiles!follows_following_id_fkey(id,username,name)')
+      .eq(followers ? 'following_id' : 'follower_id', p.id).order('created_at', { ascending: false }).limit(200);
+    var box = s.querySelector('.people');
+    if (r.error) { box.innerHTML = '<p class="err">' + esc(friendly(r.error)) + '</p>'; return; }
+    var list = r.data.map(function (x) { return x.p; }).filter(function (x) { return x && x.username; });
+    box.innerHTML = list.length ? list.map(function (x) { return personRow(x); }).join('') : '<p class="muted">' + (followers ? 'No followers yet.' : 'Not following anyone yet.') + '</p>';
+    bindPeople(box);
+  }
+
+  async function renderProfile(username) {
+    document.title = '@' + username + ' · Stashd';
+    app.innerHTML = '<div class="home">' + topbar() + '<p class="loading muted">Loading…</p></div>'; bindTopbar();
+    var pr = await sb.from('profiles').select('id,username,name').eq('username', cleanUsername(username)).maybeSingle();
+    if (pr.error || !pr.data) {
+      app.innerHTML = '<div class="home">' + topbar() + '<div class="empty"><h2>No one here</h2><p>We couldn\'t find @' + esc(username) + '.</p></div></div>'; bindTopbar(); return;
+    }
+    var p = pr.data, me = user && user.id === p.id;
+    var q = await Promise.all([
+      sb.from('follows').select('follower_id', { count: 'exact', head: true }).eq('following_id', p.id),
+      sb.from('follows').select('following_id', { count: 'exact', head: true }).eq('follower_id', p.id),
+      user && !me ? sb.from('follows').select('follower_id').eq('follower_id', user.id).eq('following_id', p.id).maybeSingle() : Promise.resolve({ data: null }),
+      sb.from('boards').select('id,name,visibility,created_at').eq('user_id', p.id).eq('visibility', 'public').order('created_at')
+    ]);
+    var boards = q[3].data || [], covers = {};
+    if (boards.length) {
+      var it = await sb.from('items').select('board_id,image_url,created_at').in('board_id', boards.map(function (b) { return b.id; })).order('created_at', { ascending: false }).limit(500);
+      (it.data || []).forEach(function (i) { var c = covers[i.board_id] || (covers[i.board_id] = { n: 0, img: '' }); c.n++; if (!c.img && safeImg(i.image_url)) c.img = i.image_url; });
+    }
+    var following = !!q[2].data, nFollowers = q[0].count || 0;
+    function paint() {
+      app.innerHTML = '<div class="home">' + topbar() +
+        '<section class="profile">' + avatar(p, 'big') + '<h1>' + esc(p.name || p.username) + '</h1><p class="muted">@' + esc(p.username) + '</p>' +
+          '<div class="counts"><button type="button" id="fwers"><b>' + nFollowers + '</b> follower' + (nFollowers === 1 ? '' : 's') + '</button><button type="button" id="fwing"><b>' + (q[1].count || 0) + '</b> following</button></div>' +
+          (me ? '<div class="row"><button class="btn" type="button" id="editP">Edit profile</button><button class="btn" type="button" id="shareP">Share profile</button></div>'
+            : user ? '<button class="btn ' + (following ? '' : 'primary') + ' follow" type="button" id="followBtn">' + (following ? 'Following' : 'Follow') + '</button>'
+            : '<button class="btn primary follow" type="button" id="joinBtn">Sign up to follow</button>') +
+        '</section>' +
+        '<h2 class="sec">Public boards</h2>' +
+        (boards.length ? '<section class="boards">' + boards.map(function (b) {
+          var c = covers[b.id] || { n: 0, img: '' };
+          return '<button class="bcard" type="button" data-bid="' + esc(b.id) + '"><span class="bimg' + (c.img ? '' : ' none') + '">' + (c.img ? '<img src="' + esc(c.img) + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : '') + '</span>' +
+            '<b>' + esc(b.name) + '</b><small>' + c.n + ' item' + (c.n === 1 ? '' : 's') + '</small></button>';
+        }).join('') + '</section>' : '<p class="muted">' + (me ? 'None yet. Open a board, tap Board settings and make it Public to show it here.' : 'No public boards yet.') + '</p>') +
+      '</div>';
+      bindTopbar();
+      document.getElementById('fwers').onclick = function () { openFollowList(p, 'followers'); };
+      document.getElementById('fwing').onclick = function () { openFollowList(p, 'following'); };
+      app.querySelectorAll('[data-bid]').forEach(function (b) { b.onclick = function () { nav({ b: b.dataset.bid }); }; });
+      var fb = document.getElementById('followBtn');
+      if (fb) fb.onclick = async function () {
+        fb.disabled = true;
+        var r = following ? await sb.from('follows').delete().eq('follower_id', user.id).eq('following_id', p.id)
+          : await sb.from('follows').insert({ follower_id: user.id, following_id: p.id });
+        if (r.error) { fb.disabled = false; return toast(friendly(r.error)); }
+        following = !following; nFollowers += following ? 1 : -1; paint();
+      };
+      var jb = document.getElementById('joinBtn'); if (jb) jb.onclick = function () { renderAuth('signup'); };
+      var ep = document.getElementById('editP'); if (ep) ep.onclick = openEditProfile;
+      var sp = document.getElementById('shareP'); if (sp) sp.onclick = function () { shareLink(base() + '?u=' + p.username, (p.name || p.username) + ' on Stashd'); };
+    }
+    paint();
+  }
+
+  async function renderBoardPage(bid, key) {
+    if (user && (roleOf(bid))) {           // my board or one shared with me: open it in my stash
+      history.replaceState(null, '', location.pathname); ui.board = bid; ui.tab = 'tobuy'; renderHome(); return;
+    }
+    app.innerHTML = '<div class="home">' + topbar() + '<p class="loading muted">Loading…</p></div>'; bindTopbar();
+    var r = await sb.rpc('shared_board', { bid: bid, k: key || null });
+    if (r.error || !r.data) {
+      app.innerHTML = '<div class="home">' + topbar() + '<div class="empty"><h2>This board is private</h2><p>' +
+        (user ? 'Ask the owner to add you, or to switch on link sharing.' : 'Sign in if it was shared with you.') + '</p>' +
+        (user ? '' : '<button class="btn primary" type="button" id="toAuth">Sign in</button>') + '</div></div>';
+      bindTopbar(); var ta = document.getElementById('toAuth'); if (ta) ta.onclick = function () { renderAuth('signin'); };
+      return;
+    }
+    var d = r.data, b = d.board, owner = d.owner || {}, items = d.items || [];
+    document.title = b.name + ' · Stashd';
+    var toBuy = items.filter(function (i) { return !i.bought; });
+    app.innerHTML = '<div class="home">' + topbar() +
+      '<section class="bhead"><h1>' + esc(b.name) + '</h1>' +
+        '<p class="muted">' + (b.visibility === 'public' ? 'Public board' : LOCK + ' Shared by link') + ' · by ' +
+        (owner.username ? '<button class="link" type="button" id="ownerLink">@' + esc(owner.username) + '</button>' : esc(owner.name || '')) + '</p>' +
+        '<div class="row" style="margin-top:.8rem"><button class="btn" type="button" id="shareB">Share</button>' + (user ? '' : '<button class="btn primary" type="button" id="joinB">Make your own stash</button>') + '</div>' +
+      '</section>' +
+      '<div class="sum"><span class="muted">' + toBuy.length + ' to buy · ' + (items.length - toBuy.length) + ' bought</span><strong>' + esc(totals(toBuy, '')) + '</strong></div>' +
+      (items.length ? '<section class="grid">' + items.map(cardHtml).join('') + '</section>' : '<div class="empty"><p>Nothing in this board yet.</p></div>') +
+    '</div>';
+    bindTopbar();
+    var ol = document.getElementById('ownerLink'); if (ol) ol.onclick = function () { nav({ u: owner.username }); };
+    document.getElementById('shareB').onclick = function () { shareLink(location.href, b.name + ' on Stashd'); };
+    var jb = document.getElementById('joinB'); if (jb) jb.onclick = function () { renderAuth('signup'); };
+    app.querySelectorAll('.card').forEach(function (c) { c.onclick = function () { var it = items.find(function (i) { return i.id === c.dataset.id; }); if (it) openItemView(it); }; });
+  }
+
+  function openItemView(it) {
+    var img = safeImg(it.image_url);
+    var s = sheet('<div class="hero-img' + (img ? '' : ' none') + '">' + (img ? '<img src="' + esc(img) + '" alt="" referrerpolicy="no-referrer">' : letter(it)) + tagsHtml(it) + '</div>' +
+      '<h2 style="margin-right:0">' + esc(it.title || 'Untitled item') + '</h2>' +
+      '<p class="muted"><span class="brand">' + esc(it.brand || '') + '</span>' + (it.size ? ' · Size ' + esc(it.size) : '') + (it.bought ? ' · Bought' : '') + '</p>' +
+      (it.price != null ? '<div class="price">' + esc(money(it.price, it.currency)) + (it.was_price > it.price ? '<s>' + esc(fmt(it.was_price)) + '</s>' : '') + '</div>' : '') +
+      (it.note ? '<p class="hint">' + esc(it.note) + '</p>' : '') +
+      '<div class="stack">' + (safeLink(it.url) ? '<a class="btn primary block" href="' + esc(safeLink(it.url)) + '" target="_blank" rel="noopener noreferrer">Open store page</a>' : '') +
+      (user && safeLink(it.url) ? '<button class="btn block" type="button" id="copyToMine">Save to my stash</button>' : '') + '</div>');
+    var c = s.querySelector('#copyToMine'); if (c) c.onclick = function () { openSave(it.url); };
+  }
+
+  async function loadShared(bid) {
+    var r = await sb.from('items').select('*').eq('board_id', bid).order('created_at', { ascending: false });
+    cache[bid] = r.error ? [] : r.data;
+    if (r.error) toast(friendly(r.error));
+    if (ui.board === bid) renderHome();
+  }
+
+  async function openBoardSettings(b) {
+    var s = sheet('<h2>Board settings</h2>' +
+      '<label class="field"><span>Board name</span><input type="text" id="bName" maxlength="40" value="' + esc(b.name) + '"></label>' +
+      '<h3>Who can see it</h3><div class="seg" role="radiogroup"><button type="button" role="radio" data-vis="private">' + LOCK + ' Private</button><button type="button" role="radio" data-vis="public">Public</button></div>' +
+      '<p class="muted small" id="visText"></p>' +
+      '<label class="switch" id="linkRow"><span>Anyone with the link can view</span><input type="checkbox" role="switch" id="linkSw"><i aria-hidden="true"></i></label>' +
+      '<div class="stack"><button class="btn block" type="button" id="shareBtn">Share link</button></div>' +
+      '<h3>People</h3><div id="members" class="people"><p class="loading muted">Loading…</p></div>' +
+      '<form id="addMember" class="addm" novalidate><input type="text" id="mUser" placeholder="@username" autocapitalize="off" spellcheck="false" aria-label="Username to add">' +
+        '<select id="mRole" aria-label="Access"><option value="viewer">View only</option><option value="editor">Can add</option></select><button class="btn primary" type="submit">Add</button></form>' +
+      '<p class="err" id="mErr"></p><p class="muted small">View only: can see the board. Can add: can also add and edit items.</p>' +
+      '<div class="stack"><button class="btn primary block" id="bSave" type="button">Done</button><button class="link danger" id="bDel" type="button">Delete board</button></div>');
+    function paintVis() {
+      s.querySelectorAll('[data-vis]').forEach(function (x) { x.setAttribute('aria-selected', x.dataset.vis === b.visibility); x.setAttribute('aria-checked', x.dataset.vis === b.visibility); });
+      s.querySelector('#visText').textContent = b.visibility === 'public' ? 'Shows on your profile. Anyone with the link can view it.'
+        : 'Only you and the people you add can see it' + (b.link_token ? ', plus anyone with the link.' : '.');
+      s.querySelector('#linkRow').hidden = b.visibility === 'public';
+      s.querySelector('#linkSw').checked = !!b.link_token;
+    }
+    paintVis();
+    s.querySelectorAll('[data-vis]').forEach(function (x) { x.onclick = function () { if (b.visibility === x.dataset.vis) return; b.visibility = x.dataset.vis; api.saveBoard(b); paintVis(); renderHome(); }; });
+    s.querySelector('#linkSw').onchange = function (e) { b.link_token = e.target.checked ? uid() : null; api.saveBoard(b); paintVis(); toast(e.target.checked ? 'Link sharing on' : 'Link sharing off. Old links stop working.'); };
+    s.querySelector('#shareBtn').onclick = function () { shareLink(boardLink(b), b.name + ' on Stashd'); };
+    var membersEl = s.querySelector('#members');
+    async function loadMembers() {
+      var r = await sb.from('board_members').select('user_id,role,p:profiles(id,username,name)').eq('board_id', b.id).order('created_at');
+      if (r.error) { membersEl.innerHTML = '<p class="err">' + esc(friendly(r.error)) + '</p>'; return; }
+      membersEl.innerHTML = '<div class="person me">' + avatar(user) + '<span><b>' + esc(user.name) + ' (you)</b><small>Owner</small></span></div>' +
+        r.data.map(function (m) {
+          var p = m.p || {};
+          return '<div class="person">' + avatar(p) + '<span><b>' + esc(p.name || p.username) + '</b><small>@' + esc(p.username || '') + '</small></span>' +
+            '<select data-mrole="' + esc(m.user_id) + '" aria-label="Access for ' + esc(p.username || '') + '"><option value="viewer"' + (m.role === 'viewer' ? ' selected' : '') + '>View only</option><option value="editor"' + (m.role === 'editor' ? ' selected' : '') + '>Can add</option></select>' +
+            '<button class="icon rm" type="button" data-mrm="' + esc(m.user_id) + '" aria-label="Remove ' + esc(p.username || '') + '">×</button></div>';
+        }).join('');
+      membersEl.querySelectorAll('[data-mrole]').forEach(function (sel) {
+        sel.onchange = async function () { var x = await sb.from('board_members').update({ role: sel.value }).eq('board_id', b.id).eq('user_id', sel.dataset.mrole); toast(x.error ? friendly(x.error) : 'Access updated'); };
+      });
+      membersEl.querySelectorAll('[data-mrm]').forEach(function (btn) {
+        btn.onclick = async function () { var x = await sb.from('board_members').delete().eq('board_id', b.id).eq('user_id', btn.dataset.mrm); if (x.error) return toast(friendly(x.error)); loadMembers(); toast('Removed'); };
+      });
+    }
+    loadMembers();
+    s.querySelector('#addMember').onsubmit = async function (e) {
+      e.preventDefault();
+      var err = s.querySelector('#mErr'), u = cleanUsername(s.querySelector('#mUser').value);
+      err.textContent = '';
+      if (!u) return (err.textContent = 'Type their @username.');
+      if (u === user.username) return (err.textContent = 'That\'s you! You already own this board.');
+      var p = await sb.from('profiles').select('id,username').eq('username', u).maybeSingle();
+      if (!p.data) return (err.textContent = 'No one with the username @' + u + '.');
+      var r = await sb.from('board_members').upsert({ board_id: b.id, user_id: p.data.id, role: s.querySelector('#mRole').value });
+      if (r.error) return (err.textContent = friendly(r.error));
+      s.querySelector('#mUser').value = ''; loadMembers(); toast('@' + u + ' added');
+    };
+    s.querySelector('#bSave').onclick = function () { var n = s.querySelector('#bName').value.trim(); if (n && n !== b.name) { b.name = n.slice(0, 40); api.saveBoard(b); } closeSheet(); renderHome(); };
+    s.querySelector('#bDel').onclick = function () {
+      if (!confirm('Delete the board "' + b.name + '"? Your items stay in All. People you shared it with lose access.')) return;
+      db.boards = db.boards.filter(function (x) { return x.id !== b.id; });
+      db.items = db.items.filter(function (i) { return i.board_id !== b.id || i.user_id === user.id; });
+      db.items.forEach(function (i) { if (i.board_id === b.id) i.board_id = null; });
+      api.deleteBoard(b.id); ui.board = 'all'; closeSheet(); renderHome(); toast('Board deleted');
+    };
+  }
+
+  async function openBoardInfo(b) {
+    var s = sheet('<h2>' + esc(b.name) + '</h2><p class="muted">Shared with you by ' + (b.owner && b.owner.username ? '<button class="link" type="button" id="ownerLink">@' + esc(b.owner.username) + '</button>' : 'its owner') +
+      '. You can ' + (b.role === 'editor' ? 'view it and add items' : 'view it') + '.</p>' +
+      '<h3>People</h3><div class="people" id="members"><p class="loading muted">Loading…</p></div>' +
+      '<div class="stack"><button class="btn block" type="button" id="shareBtn">Share link</button><button class="link danger" type="button" id="leave">Leave board</button></div>' +
+      '<p class="muted small">The link only works for people who have access' + (b.visibility === 'public' ? ', or anyone, since this board is public' : '') + '.</p>');
+    var ol = s.querySelector('#ownerLink'); if (ol) ol.onclick = function () { closeSheet(); nav({ u: b.owner.username }); };
+    s.querySelector('#shareBtn').onclick = function () { shareLink(base() + '?b=' + b.id, b.name + ' on Stashd'); };
+    s.querySelector('#leave').onclick = async function () {
+      if (!confirm('Leave "' + b.name + '"? You\'ll need to be added again to see it.')) return;
+      var r = await sb.from('board_members').delete().eq('board_id', b.id).eq('user_id', user.id);
+      if (r.error) return toast(friendly(r.error));
+      db.shared = db.shared.filter(function (x) { return x.id !== b.id; }); ui.board = 'all'; closeSheet(); renderHome(); toast('You left the board');
+    };
+    var r = await sb.from('board_members').select('role,p:profiles(id,username,name)').eq('board_id', b.id).order('created_at');
+    var el = s.querySelector('#members');
+    if (r.error) { el.innerHTML = '<p class="err">' + esc(friendly(r.error)) + '</p>'; return; }
+    el.innerHTML = (b.owner ? personRow(b.owner, '<em>Owner</em>') : '') + r.data.map(function (m) { return m.p ? personRow(m.p, '<em>' + (m.role === 'editor' ? 'Can add' : 'View only') + '</em>') : ''; }).join('');
+    bindPeople(el);
+  }
+
   /* ---------- start ---------- */
   async function boot() {
     var p = new URLSearchParams(location.search);
@@ -910,7 +1305,7 @@
       var got = await sb.auth.getSession();
       var ses = got && got.data && got.data.session;
       if (ses) startCloud(ses.user, location.hash.indexOf('type=signup') >= 0 ? 'Email confirmed. Welcome to Stashd!' : '');
-      else renderAuth();
+      else route();
       return;
     }
     var sid = load(KEY.session, null), users = load(KEY.users, {});

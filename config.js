@@ -5,5 +5,5 @@ window.STASHD_CONFIG = {
   supabaseUrl: 'https://fmwwzixstqlytalqwuda.supabase.co',
   supabaseKey: 'sb_publishable_ZWRjp2JJOI5oAcxhjRuVpA_p8p3Sa8h',
   // Turn these on once each provider is set up in Supabase → Authentication → Sign In / Providers.
-  providers: { google: false, apple: false }
+  providers: { google: true, apple: false }
 };
