@@ -3,5 +3,5 @@
    Leave supabaseKey empty to run in local test mode (data stays in this browser). */
 window.STASHD_CONFIG = {
   supabaseUrl: 'https://fmwwzixstqlytalqwuda.supabase.co',
-  supabaseKey: ''
+  supabaseKey: 'sb_publishable_ZWRjp2JJOI5oAcxhjRuVpA_p8p3Sa8h'
 };
