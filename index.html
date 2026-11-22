@@ -47,14 +47,15 @@ footer{text-align:center;font-size:.8125rem;padding:1.5rem 1.25rem;opacity:.75}
     <li>Mark what you bought.</li>
   </ul>
 
-  <!-- Set action to your sign-up service endpoint (see README). Works without JavaScript too. -->
-  <form id="signup" action="https://formspree.io/f/YOUR_FORM_ID" method="POST">
+  <!-- Sign-ups go to the Brevo list. Works without JavaScript too (falls back to Brevo's own confirmation page). -->
+  <form id="signup" action="https://ce2511d3.sibforms.com/serve/MUIFAGWBoXMZ0PhFB65Hri17rnly6SI4WLFuhUGEddRvKbr7EYvpj55CW81ejWZb82cq64RB2h6aXwq9DImojPK7ewUeJs9eRsTXxQFsSMsCkY9TR9tGpE_W5o4W6P09a2Po62M8uuD5vTj1S_Zg0Dg79Rh1i6huAwZ_bBedav0tHyg2vVTurIBhL6q2mFO6RiITi5x-_zIP2sbD4g==" method="POST">
     <label for="email">Get early access</label>
     <div class="row">
-      <input id="email" name="email" type="email" autocomplete="email" inputmode="email" placeholder="you@example.com" required>
+      <input id="email" name="EMAIL" type="email" autocomplete="email" inputmode="email" placeholder="you@example.com" required>
       <button type="submit">Join the list</button>
     </div>
-    <input class="hp" type="text" name="_gotcha" tabindex="-1" autocomplete="off" aria-hidden="true">
+    <input class="hp" type="text" name="email_address_check" value="" tabindex="-1" autocomplete="off" aria-hidden="true">
+    <input type="hidden" name="locale" value="en">
     <p class="consent">By signing up, you agree that Stashd may email you about the launch and product updates. You can unsubscribe at any time. See our <a href="privacy.html">privacy policy</a>.</p>
     <p class="status" id="status" role="status" aria-live="polite"></p>
   </form>
@@ -68,10 +69,10 @@ footer{text-align:center;font-size:.8125rem;padding:1.5rem 1.25rem;opacity:.75}
   f.addEventListener('submit',function(e){
     e.preventDefault();
     b.disabled=true;s.textContent='Sending…';
-    fetch(f.action,{method:'POST',body:new FormData(f),headers:{Accept:'application/json'}})
+    fetch(f.action+(f.action.indexOf('?')<0?'?':'&')+'isAjax=1',{method:'POST',body:new FormData(f),headers:{Accept:'application/json'}})
       .then(function(r){
         if(!r.ok)throw 'http';
-        f.reset();s.textContent="You're on the list. Thanks!";
+        f.reset();s.textContent='Almost there! Check your inbox to confirm your email.';
       })
       .catch(function(err){
         // Network/CORS block (e.g. some list services): fall back to a normal form post.
