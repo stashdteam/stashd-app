@@ -1,0 +1,82 @@
+# Stashd: project brief
+
+## What Stashd is
+A mobile app (iPhone and Android) where you save products you spot in social media ads and online stores, sort them into boards like Pinterest, and mark them as bought. Tagline: "Like it. Stash it. Buy it."
+
+**The problem:** the founder sees products in ads across many platforms and saves them, but they get lost. She ends up sending links to her own WhatsApp chat.
+
+**Who it is for (assumption, to confirm with 10 interviews):** women who shop from Instagram, TikTok, and online fashion stores. Start with one country.
+
+**How it differs from Moonsift and similar apps:** personal shopping instead of gift lists; marks items as bought and shows what is left to spend; back-in-stock alerts for sold-out items; works with local stores and currencies (to be tested).
+
+## MVP (version 1)
+- Save a link, by pasting it or from the iPhone and Android share menu.
+- Auto-fill photo, title, store, price, old price, and sold-out status.
+- Boards, and a Pinterest-style two-column photo grid.
+- To buy and Bought tabs; "left to spend" total.
+- Tags on cards: Sold out, percent off.
+- Item screen: photo, price, size, note, board, sold-out switch, Mark as bought, Open store page.
+
+**Later (version 2):** price tracking and drop alerts, back-in-stock alerts, push notifications, shared boards, a Pro plan.
+
+## Example item used in the prototype
+Nesaa, "Embroidered Gabardine Pants in Beige": EGP 2,699 (was 2,850, 5% off), sold out. Page: https://www.nesaaonline.com/products/embroidered-gabardine-pants-in-beige
+
+## Brand and design
+- Header is plain text: "Stash" in bold with the "d" in the accent color. No logo for now (an app icon is still to be decided).
+- Theme (neutral beige and brown, no pink): background #F3EBDD, cards #FBF7F0, text #3F2A1E, accent #8A5A3C, border #E2D5C1. Dark mode: background #1C1612, cards #271F19, text #F3EBDD, accent #D6A97E.
+- Tone: friendly, short, a little cheeky.
+
+## Tech plan
+- App: Expo (React Native, TypeScript, Expo Router), one codebase for iOS and Android.
+- Backend: Supabase (login, Postgres, photo storage, edge functions). Row-level security so users see only their own data.
+- Builds: Expo EAS cloud builds; test on iPhone through TestFlight.
+- Building with: Claude Code on the web (claude.ai/code or the Claude app Code tab), connected to the private GitHub repository `stashd-app`. The founder works from an iPad and tests on an iPhone.
+
+**Data model:**
+- boards: id, user_id, name
+- items: id, user_id, board_id, url, title, brand, image_url, price, was_price, currency, size, note, sold_out, bought, created_at
+
+## Plan and milestones (start 30 Nov 2026; edit in the workbook)
+1. Ready to build: 13 Dec 2026
+2. Working MVP on the phone: 17 Jan 2027
+3. Beta approved by testers: 7 Feb 2027
+4. Approved in both stores: 21 Feb 2027
+5. Public launch: 28 Mar 2027
+6. Version 2 live: 9 May 2027
+
+Marketing milestones: accounts live (13 Dec), waitlist reached (7 Feb), beta testers recruited (31 Jan), launch kit ready (28 Feb), launch week done (14 Mar), first 30 days reviewed (9 May).
+
+## Accounts
+Stashd Gmail (2-step on), Instagram (Professional), TikTok, Apple Developer Program (individual), Google Play Console, GitHub, Expo, Supabase. Claude Pro is subscribed.
+
+## Status so far
+Done: web prototype, UX flow, brand direction, launch plan workbook, accounts set up. Next: Apple and Google enrollment, then Prompt 1 in Claude Code (see the Prompts sheet).
+
+## Open questions
+- Is the handle "stashd" free on Instagram and TikTok, and is the name clear of trademarks in the founder's region?
+- How many testers and days does Google Play currently require for a new personal account?
+- Does link import work with Egyptian stores and EGP prices? (Test with Nesaa.)
+- App icon: still to be decided.
+
+## How Claude should work in this project
+- Answer in short, mobile-friendly messages; lead with the answer.
+- Ask before big decisions; do not assume a store, price, or rule that may have changed. Check current official docs.
+- Label estimates, and never present a guess as a verified price.
+- Keep the beige and brown theme, and the plain-text "Stashd" header.
+- When writing code, keep changes small and explain each step briefly.
+
+## Files and links
+- stashd-launch-plan.xlsx: Gantt, milestones, social setup, marketing, budget, prompts (budget is kept out of this repo)
+- UX flow: https://claude.ai/artifact/Aiw3qfrvriAXSXYWGgc1me
+- Working prototype: https://claude.ai/artifact/KhPyTqo4vY1C7aN3DgNq7h
+
+## What's in this repository now: the web test app
+A plain HTML/CSS/JS web version of the MVP, published with GitHub Pages, for testing the flow on a phone before the Expo app exists.
+- `index.html`, `app.css`, `app.js`: the app (sign up / sign in, boards, grid, To buy / Bought, left to spend, item screen, Save to Stashd sheet).
+- `manifest.webmanifest`, `icons/`: installable on Android; `share_target` puts Stashd in the Android share menu. iPhone sharing uses a Shortcut that opens `?url=<link>`.
+- Test mode: accounts and items live in the browser's localStorage, shaped like the Supabase tables above. Moving to Supabase is the next step.
+- Link reading: Shopify `/products/<handle>.js` (Nesaa is Shopify), then the page's own meta tags, then the Microlink free API (title and photo only). Anything missing is filled in by hand. A Supabase edge function should replace this for reliability.
+- Newsletter opt-in posts to the Brevo form (address is in `app.js`).
+- `privacy.html`: draft; contact email and date still to fill in.
+- `_config.yml` stops GitHub Pages from publishing this file.
