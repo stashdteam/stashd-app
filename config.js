@@ -1,0 +1,7 @@
+/* Stashd settings. The publishable (anon) key is meant to be public: row-level security
+   in supabase/schema.sql is what keeps each person's data private.
+   Leave supabaseKey empty to run in local test mode (data stays in this browser). */
+window.STASHD_CONFIG = {
+  supabaseUrl: 'https://fmwwzixstqlytalqwuda.supabase.co',
+  supabaseKey: ''
+};

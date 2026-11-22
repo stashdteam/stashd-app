@@ -71,12 +71,14 @@ Done: web prototype, UX flow, brand direction, launch plan workbook, accounts se
 - UX flow: https://claude.ai/artifact/Aiw3qfrvriAXSXYWGgc1me
 - Working prototype: https://claude.ai/artifact/KhPyTqo4vY1C7aN3DgNq7h
 
-## What's in this repository now: the web test app
+## What's in this repository now: the web app
 A plain HTML/CSS/JS web version of the MVP, published with GitHub Pages, for testing the flow on a phone before the Expo app exists.
 - `index.html`, `app.css`, `app.js`: the app (sign up / sign in, boards, grid, To buy / Bought, left to spend, item screen, Save to Stashd sheet).
+- `config.js`: Supabase project URL (https://fmwwzixstqlytalqwuda.supabase.co) and publishable key. With no key, the app runs in local test mode (localStorage).
+- `supabase/schema.sql`: tables `boards` and `items` (as in the data model, plus `sizes text[]` for size chips), row-level security, a public `photos` storage bucket with per-user folders, and `delete_my_account()`. Run it in the Supabase SQL editor.
+- Supabase JS is loaded from jsDelivr, pinned to @supabase/supabase-js@2.118.0.
 - `manifest.webmanifest`, `icons/`: installable on Android; `share_target` puts Stashd in the Android share menu. iPhone sharing uses a Shortcut that opens `?url=<link>`.
-- Test mode: accounts and items live in the browser's localStorage, shaped like the Supabase tables above. Moving to Supabase is the next step.
-- Link reading: Shopify `/products/<handle>.js` (Nesaa is Shopify), then the page's own meta tags, then the Microlink free API (title and photo only). Anything missing is filled in by hand. A Supabase edge function should replace this for reliability.
-- Newsletter opt-in posts to the Brevo form (address is in `app.js`).
+- Link reading runs in the browser: Shopify `/products/<handle>.js` (Nesaa is Shopify), then the page's own meta tags, then the Microlink free API (title and photo only). Anything missing is filled in by hand. A Supabase edge function should replace this for reliability.
+- Newsletter opt-in on sign-up posts to the Brevo form (address is in `app.js`).
 - `privacy.html`: draft; contact email and date still to fill in.
 - `_config.yml` stops GitHub Pages from publishing this file.

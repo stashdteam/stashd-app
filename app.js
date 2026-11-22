@@ -1,6 +1,6 @@
-/* Stashd web test app.
-   Test version: accounts and items are stored in this browser (localStorage).
-   Data shape follows the planned Supabase tables (boards, items) so it can move there later. */
+/* Stashd web app.
+   Cloud mode (config.js has a Supabase key): accounts, boards and items live in Supabase.
+   Local test mode (no key): everything is stored in this browser (localStorage). */
 (function () {
   'use strict';
 
@@ -21,16 +21,53 @@
   }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function safeImg(u) { return /^(https?:\/\/|data:image\/)/i.test(u || '') ? u : ''; }
-  function uid() { return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2); }
+  function uid() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    var b = crypto.getRandomValues(new Uint8Array(16)); b[6] = (b[6] & 15) | 64; b[8] = (b[8] & 63) | 128;
+    var h = Array.from(b).map(function (x) { return x.toString(16).padStart(2, '0'); }).join('');
+    return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
+  }
   function num(v) { if (v === '' || v == null) return null; var n = parseFloat(String(v).replace(/[^\d.]/g, '')); return isFinite(n) ? n : null; }
   function fmt(n) { return new Intl.NumberFormat('en', { maximumFractionDigits: 2 }).format(n); }
   function money(n, c) { return n == null ? '' : (c ? c + ' ' : '') + fmt(n); }
   function pct(it) { return (it.price != null && it.was_price != null && it.was_price > it.price) ? Math.round((it.was_price - it.price) / it.was_price * 100) : 0; }
   function hostBrand(url) { try { return new URL(url).hostname.replace(/^www\./, '').split('.')[0]; } catch (e) { return ''; } }
   function boardName(id) { var b = db.boards.find(function (x) { return x.id === id; }); return b ? b.name : ''; }
-  function persist() { return save(KEY.data(user.id), db); }
+  function persist() { return CLOUD ? true : save(KEY.data(user.id), db); }
   var toastTimer;
   function toast(msg) { toastEl.textContent = msg; toastEl.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 2600); }
+
+  /* ---------- backend ---------- */
+  var CFG = window.STASHD_CONFIG || {};
+  var CLOUD = !!(CFG.supabaseUrl && CFG.supabaseKey);
+  var sb = null;
+  var COLS = ['id', 'user_id', 'board_id', 'url', 'title', 'brand', 'image_url', 'price', 'was_price', 'currency', 'size', 'sizes', 'note', 'sold_out', 'bought', 'created_at'];
+  function row(it) { var r = {}; COLS.forEach(function (k) { if (it[k] !== undefined) r[k] = it[k]; }); return r; }
+  function base() { return location.origin + location.pathname.replace(/index\.html$/, ''); }
+  function syncFail(e) { if (window.console) console.error(e); toast("Couldn't sync. " + ((e && e.message) || 'Check your connection.')); return false; }
+  function done(r) { return r.error ? syncFail(r.error) : true; }
+  var saveTimers = {};
+  var api = {
+    saveItem: function (it) { clearTimeout(saveTimers[it.id]); return CLOUD ? sb.from('items').upsert(row(it)).then(done, syncFail) : Promise.resolve(persist()); },
+    saveItemSoon: function (it) { clearTimeout(saveTimers[it.id]); if (!CLOUD) return persist(); saveTimers[it.id] = setTimeout(function () { api.saveItem(it); }, 600); },
+    deleteItem: function (id) { clearTimeout(saveTimers[id]); return CLOUD ? sb.from('items').delete().eq('id', id).then(done, syncFail) : Promise.resolve(persist()); },
+    saveBoard: function (b) { return CLOUD ? sb.from('boards').upsert({ id: b.id, user_id: b.user_id, name: b.name, created_at: b.created_at }).then(done, syncFail) : Promise.resolve(persist()); },
+    deleteBoard: function (id) { return CLOUD ? sb.from('boards').delete().eq('id', id).then(done, syncFail) : Promise.resolve(persist()); },
+    saveProfile: function () {
+      if (!CLOUD) { saveUser(); return Promise.resolve(true); }
+      return sb.auth.updateUser({ data: { name: user.name, currency: user.currency } }).then(done, syncFail);
+    },
+    photo: function (it, dataUrl) {
+      if (!CLOUD) return Promise.resolve(dataUrl);
+      return fetch(dataUrl).then(function (r) { return r.blob(); }).then(function (blob) {
+        var path = user.id + '/' + it.id + '-' + Date.now() + '.jpg';
+        return sb.storage.from('photos').upload(path, blob, { contentType: 'image/jpeg', upsert: true }).then(function (r) {
+          if (r.error) throw r.error;
+          return sb.storage.from('photos').getPublicUrl(path).data.publicUrl;
+        });
+      });
+    }
+  };
 
   function extractUrl(text) {
     if (!text) return '';
@@ -65,7 +102,7 @@
     if (t && t.tagName === 'IMG') { var p = t.parentNode; t.remove(); if (p && p.classList) p.classList.add('none'); }
   }, true);
 
-  /* ---------- accounts (local test mode) ---------- */
+  /* ---------- accounts ---------- */
   async function hash(pw, salt) {
     var data = new TextEncoder().encode(salt + ':' + pw);
     if (window.crypto && crypto.subtle) {
@@ -90,8 +127,8 @@
   function hasPending() { try { return !!sessionStorage.getItem(KEY.pending); } catch (e) { return false; } }
   function takePending() { try { var v = sessionStorage.getItem(KEY.pending); sessionStorage.removeItem(KEY.pending); return v; } catch (e) { return ''; } }
 
-  function renderAuth(mode) {
-    mode = mode || (Object.keys(load(KEY.users, {})).length ? 'signin' : 'signup');
+  function renderAuth(mode, note) {
+    mode = mode || (!CLOUD && Object.keys(load(KEY.users, {})).length ? 'signin' : 'signup');
     var up = mode === 'signup';
     document.title = 'Stashd · ' + (up ? 'Create account' : 'Sign in');
     app.innerHTML =
@@ -99,7 +136,7 @@
         '<h1 class="wm">Stash<span>d</span></h1>' +
         '<p class="tagline">Like it. Stash it. Buy it.</p>' +
         '<ul class="perks"><li>Save from any store or ad</li><li>Sort it into boards</li><li>Mark what you bought</li></ul>' +
-        (hasPending() ? '<p class="notice">Sign in to stash the link you just shared.</p>' : '') +
+        (note ? '<p class="notice">' + esc(note) + '</p>' : hasPending() ? '<p class="notice">Sign in to stash the link you just shared.</p>' : '') +
         '<div class="seg" role="tablist">' +
           '<button type="button" role="tab" data-mode="signup" aria-selected="' + up + '">Create account</button>' +
           '<button type="button" role="tab" data-mode="signin" aria-selected="' + !up + '">Sign in</button>' +
@@ -111,8 +148,9 @@
           (up ? '<label class="check"><input type="checkbox" name="news"><span>Email me Stashd news and launch updates. You can unsubscribe at any time. See our <a href="privacy.html">privacy policy</a>.</span></label>' : '') +
           '<p class="err" id="authErr" role="alert"></p>' +
           '<button class="btn primary block" type="submit">' + (up ? 'Create account' : 'Sign in') + '</button>' +
+          (CLOUD && !up ? '<p style="text-align:center;margin-top:.75rem"><button class="link" type="button" id="forgotBtn">Forgot your password?</button></p>' : '') +
         '</form>' +
-        '<p class="fine">Test version: your account and stash are saved in this browser, on this device only. <a href="privacy.html">Privacy</a></p>' +
+        '<p class="fine">' + (CLOUD ? 'Your stash is saved to your account, so it\'s there on any device you sign in on.' : 'Test version: your account and stash are saved in this browser, on this device only.') + ' <a href="privacy.html">Privacy</a></p>' +
       '</main>';
 
     app.querySelectorAll('[data-mode]').forEach(function (b) { b.onclick = function () { renderAuth(b.dataset.mode); }; });
@@ -124,6 +162,7 @@
       if (up && !name) return (err.textContent = 'Add your name.');
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return (err.textContent = 'That email doesn\'t look right.');
       if (pw.length < 6) return (err.textContent = 'Use at least 6 characters for your password.');
+      if (CLOUD) return cloudAuth(up, name, email, pw, !!fd.get('news'), err, form.querySelector('[type=submit]'));
       var users = load(KEY.users, {});
       if (up) {
         if (users[email]) return (err.textContent = 'There\'s already an account with that email on this device. Sign in instead.');
@@ -138,20 +177,133 @@
         signIn(u, 'Welcome back, ' + u.name + '!');
       }
     };
+    var fb = document.getElementById('forgotBtn');
+    if (fb) fb.onclick = async function () {
+      var email = String(new FormData(form).get('email') || '').trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return (err.textContent = 'Type your email above first, then tap Forgot your password.');
+      fb.disabled = true;
+      var r = await sb.auth.resetPasswordForEmail(email, { redirectTo: base() });
+      fb.disabled = false;
+      if (r.error) return (err.textContent = friendly(r.error));
+      renderAuth('signin', 'Check your inbox for a link to set a new password.');
+    };
+  }
+
+  function friendly(e) {
+    var m = (e && e.message) || '';
+    if (/invalid login/i.test(m)) return 'Email or password is wrong.';
+    if (/not confirmed/i.test(m)) return 'Confirm your email first. The link is in your inbox.';
+    if (/already registered|already exists/i.test(m)) return 'There\'s already an account with that email. Sign in instead.';
+    if (/rate limit|too many/i.test(m)) return 'Too many tries. Wait a few minutes and try again.';
+    if (/fetch|network/i.test(m)) return 'Can\'t reach Stashd. Check your connection.';
+    return m || 'Something went wrong. Try again.';
+  }
+
+  async function cloudAuth(up, name, email, pw, news, err, btn) {
+    btn.disabled = true; err.textContent = '';
+    try {
+      if (up) {
+        var r = await sb.auth.signUp({ email: email, password: pw, options: { data: { name: name, currency: 'EGP' }, emailRedirectTo: base() } });
+        if (r.error) return (err.textContent = friendly(r.error));
+        if (news) subscribeBrevo(email);
+        if (r.data.session) return startCloud(r.data.session.user, 'Welcome to Stashd, ' + name + '!');
+        renderAuth('signin', 'Almost there! We sent a link to ' + email + '. Tap it to confirm your email, then sign in.');
+      } else {
+        var s = await sb.auth.signInWithPassword({ email: email, password: pw });
+        if (s.error) return (err.textContent = friendly(s.error));
+        startCloud(s.data.user, 'Welcome back!');
+      }
+    } catch (e) { err.textContent = friendly(e); }
+    finally { btn.disabled = false; }
+  }
+
+  async function startCloud(au, msg) {
+    var md = au.user_metadata || {};
+    user = { id: au.id, email: au.email, name: md.name || (au.email || '').split('@')[0], currency: md.currency || 'EGP' };
+    app.innerHTML = '<p class="boot loading" style="justify-content:center">Loading your stash…</p>';
+    var res = await Promise.all([
+      sb.from('boards').select('id,user_id,name,created_at').order('created_at'),
+      sb.from('items').select('*').order('created_at', { ascending: false })
+    ]).catch(function (e) { return [{ error: e }, {}]; });
+    if (res[0].error || res[1].error) {
+      var e = res[0].error || res[1].error;
+      app.innerHTML = '<div class="empty"><h2>Couldn\'t load your stash</h2><p>' + esc(friendly(e)) + '</p><button class="btn primary" id="retry" type="button">Try again</button></div>';
+      document.getElementById('retry').onclick = function () { startCloud(au, msg); };
+      return;
+    }
+    db = { boards: res[0].data, items: res[1].data };
+    if (!db.boards.length) {
+      var seed = [newBoard('Outfits', 0), newBoard('Gifts', 1)];
+      var ins = await sb.from('boards').insert(seed).select('id,user_id,name,created_at');
+      db.boards = ins.error ? [] : ins.data;
+    }
+    afterSignIn(msg);
+  }
+
+  function localStashes() {
+    if (load('stashd:imported', false)) return [];
+    var out = [];
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        if (k && k.indexOf('stashd:data:') === 0) { var d = load(k, null); if (d && d.items && d.items.length) out.push(d); }
+      }
+    } catch (e) {}
+    return out;
+  }
+
+  async function importLocal(btn) {
+    btn.disabled = true; btn.textContent = 'Moving your items…';
+    var stashes = localStashes(), moved = 0;
+    for (var s = 0; s < stashes.length; s++) {
+      var d = stashes[s], map = {};
+      for (var b = 0; b < d.boards.length; b++) {
+        var lb = d.boards[b], found = db.boards.find(function (x) { return x.name.toLowerCase() === lb.name.toLowerCase(); });
+        if (!found) { found = newBoard(lb.name); if (await api.saveBoard(found)) db.boards.push(found); else continue; }
+        map[lb.id] = found.id;
+      }
+      for (var i = 0; i < d.items.length; i++) {
+        var it = Object.assign({}, d.items[i], { id: uid(), user_id: user.id, board_id: map[d.items[i].board_id] || null });
+        if (/^data:image\//.test(it.image_url || '')) { try { it.image_url = await api.photo(it, it.image_url); } catch (e) { it.image_url = ''; } }
+        if (await api.saveItem(it)) { db.items.push(it); moved++; }
+      }
+    }
+    save('stashd:imported', true);
+    renderHome(); toast(moved ? 'Moved ' + moved + ' item' + (moved === 1 ? '' : 's') + ' to your account' : 'Nothing was moved');
+  }
+
+  function openNewPassword() {
+    var s = sheet('<h2>Set a new password</h2><form id="pwForm" novalidate><label class="field"><span>New password</span><input type="password" name="pw" minlength="6" autocomplete="new-password" required></label>' +
+      '<p class="err" id="pwErr"></p><button class="btn primary block" type="submit">Save password</button></form>');
+    s.querySelector('#pwForm').onsubmit = async function (e) {
+      e.preventDefault();
+      var pw = s.querySelector('[name=pw]').value;
+      if (pw.length < 6) return (s.querySelector('#pwErr').textContent = 'Use at least 6 characters.');
+      var r = await sb.auth.updateUser({ password: pw });
+      if (r.error) return (s.querySelector('#pwErr').textContent = friendly(r.error));
+      closeSheet(); toast('Password updated');
+    };
   }
 
   function signIn(u, msg) {
     user = u; save(KEY.session, u.id);
     db = load(KEY.data(u.id), null);
-    if (!db) { db = { boards: [newBoard('Outfits'), newBoard('Gifts')], items: [] }; persist(); }
+    if (!db) { db = { boards: [newBoard('Outfits', 0), newBoard('Gifts', 1)], items: [] }; persist(); }
+    afterSignIn(msg);
+  }
+  function afterSignIn(msg) {
     ui = { board: 'all', tab: 'tobuy' };
     renderHome();
     var p = takePending();
     if (p) openSave(p); else if (msg) toast(msg);
   }
-  function signOut() { try { localStorage.removeItem(KEY.session); } catch (e) {} user = db = null; closeSheet(); renderAuth('signin'); }
+  async function signOut() {
+    if (CLOUD) { try { await sb.auth.signOut(); } catch (e) {} }
+    else { try { localStorage.removeItem(KEY.session); } catch (e) {} }
+    user = db = null; closeSheet(); renderAuth('signin');
+  }
   function saveUser() { var users = load(KEY.users, {}); users[user.email] = user; save(KEY.users, users); }
-  function newBoard(name) { return { id: uid(), user_id: user.id, name: name }; }
+  function newBoard(name, n) { return { id: uid(), user_id: user.id, name: name, created_at: new Date(Date.now() + (n || 0)).toISOString() }; }
 
   /* ---------- home ---------- */
   function renderHome() {
@@ -177,6 +329,7 @@
           '<button type="button" role="tab" data-tab="tobuy" aria-selected="' + (ui.tab === 'tobuy') + '">To buy · ' + toBuy.length + '</button>' +
           '<button type="button" role="tab" data-tab="bought" aria-selected="' + (ui.tab === 'bought') + '">Bought · ' + bought.length + '</button>' +
         '</div>' +
+        (CLOUD && localStashes().length ? '<div class="hint" style="margin:0 0 1rem">You have items from the test version saved on this device. <div class="row" style="margin-top:.6rem"><button class="btn primary" type="button" id="importBtn">Move them to my account</button><button class="btn" type="button" id="importNo">No thanks</button></div></div>' : '') +
         '<div class="sum"><span class="muted">' + (ui.tab === 'bought' ? 'Spent' : 'Left to spend') + '</span><strong>' + esc(totals(ui.tab === 'bought' ? bought : toBuy, user.currency)) + '</strong></div>' +
         (list.length ? '<section class="grid">' + list.map(cardHtml).join('') + '</section>' : emptyHtml()) +
       '</div>';
@@ -190,6 +343,8 @@
     app.querySelectorAll('.card').forEach(function (c) { c.onclick = function () { openItem(c.dataset.id); }; });
     var es = document.getElementById('emptyAdd'); if (es) es.onclick = openAdd;
     var ss = document.getElementById('emptySetup'); if (ss) ss.onclick = openSetup;
+    var ib = document.getElementById('importBtn'); if (ib) ib.onclick = function () { importLocal(ib); };
+    var inb = document.getElementById('importNo'); if (inb) inb.onclick = function () { save('stashd:imported', true); renderHome(); };
   }
 
   function emptyHtml() {
@@ -216,7 +371,7 @@
   function promptBoard(done) {
     var name = (window.prompt('Name your new board', '') || '').trim();
     if (!name) return;
-    var b = newBoard(name.slice(0, 40)); db.boards.push(b); persist(); toast('Board "' + b.name + '" added');
+    var b = newBoard(name.slice(0, 40)); db.boards.push(b); api.saveBoard(b); toast('Board "' + b.name + '" added');
     done(b);
   }
   function openBoardEdit() {
@@ -224,12 +379,12 @@
     var s = sheet('<h2>Edit board</h2><label class="field"><span>Board name</span><input type="text" id="bName" maxlength="40" value="' + esc(b.name) + '"></label>' +
       '<div class="stack"><button class="btn primary" id="bSave" type="button">Save</button><button class="btn danger" id="bDel" type="button">Delete board</button></div>' +
       '<p class="muted" style="margin-top:.75rem;font-size:.875rem">Deleting a board keeps its items. They stay under All.</p>');
-    s.querySelector('#bSave').onclick = function () { var n = s.querySelector('#bName').value.trim(); if (n) { b.name = n.slice(0, 40); persist(); } closeSheet(); renderHome(); };
+    s.querySelector('#bSave').onclick = function () { var n = s.querySelector('#bName').value.trim(); if (n) { b.name = n.slice(0, 40); api.saveBoard(b); } closeSheet(); renderHome(); };
     s.querySelector('#bDel').onclick = function () {
       if (!confirm('Delete the board "' + b.name + '"? Its items stay in All.')) return;
       db.boards = db.boards.filter(function (x) { return x.id !== b.id; });
       db.items.forEach(function (i) { if (i.board_id === b.id) i.board_id = null; });
-      persist(); ui.board = 'all'; closeSheet(); renderHome(); toast('Board deleted');
+      api.deleteBoard(b.id); ui.board = 'all'; closeSheet(); renderHome(); toast('Board deleted');
     };
   }
   function boardChips(it) {
@@ -293,7 +448,7 @@
       el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', handler);
     });
     var ph = root.querySelector('[data-photo]');
-    if (ph) ph.onchange = function () { var file = ph.files && ph.files[0]; if (file) shrinkPhoto(file).then(function (d) { it.image_url = d; onChange('image_url'); }).catch(function () { toast("Couldn't read that photo."); }); };
+    if (ph) ph.onchange = function () { var file = ph.files && ph.files[0]; if (file) { toast('Adding photo…'); shrinkPhoto(file).then(function (d) { return api.photo(it, d); }).then(function (u) { it.image_url = u; onChange('image_url'); }).catch(function () { toast("Couldn't add that photo."); }); } };
   }
   function shrinkPhoto(file) {
     return new Promise(function (res, rej) {
@@ -459,12 +614,13 @@
       '<div class="stack"><button class="btn primary block" type="button" id="stashBtn">Stash it</button></div>';
     var refresh = function (f) { if (!f || f !== 'note') prev.innerHTML = previewHtml(it); };
     bindBoardChips(body, it, refresh); bindSize(body, it, refresh); bindFields(body, it, refresh);
-    body.querySelector('#stashBtn').onclick = function () {
+    body.querySelector('#stashBtn').onclick = async function () {
+      var btn = this;
       if (!it.title) it.title = it.brand ? it.brand + ' item' : 'Untitled item';
       it.created_at = new Date().toISOString();
-      if (!it.sizes.length) delete it.sizes;
+      btn.disabled = true; btn.textContent = 'Stashing…';
       db.items.push(it);
-      if (!persist()) { db.items.pop(); return; }
+      if (!(await api.saveItem(it))) { db.items.pop(); btn.disabled = false; btn.textContent = 'Stash it'; return; }
       closeSheet(); ui.tab = 'tobuy'; renderHome();
       toast('Saved' + (it.board_id ? ' to ' + boardName(it.board_id) : '') + ' · just now');
     };
@@ -495,17 +651,17 @@
       bb.textContent = it.bought ? 'Move back to To buy' : 'Mark as bought';
     }
     var change = function (f) {
-      persist(); paint(); renderHome();
+      api.saveItemSoon(it); paint(); renderHome();
       if (f === 'image_url') { hero.classList.remove('none'); hero.innerHTML = '<img src="' + esc(safeImg(it.image_url)) + '" alt="">' + tagsHtml(it); }
       if (f === 'url') { var a = s.querySelector('#openStore'); if (a && safeLink(it.url)) a.href = safeLink(it.url); }
     };
     paint();
     bindBoardChips(s, it, change); bindSize(s, it, change); bindFields(s, it, change);
     s.querySelector('#soldSw').onchange = function (e) { it.sold_out = e.target.checked; change(); };
-    bb.onclick = function () { it.bought = !it.bought; persist(); closeSheet(); renderHome(); toast(it.bought ? 'Marked as bought. Enjoy it!' : 'Moved back to To buy'); };
+    bb.onclick = function () { it.bought = !it.bought; api.saveItem(it); closeSheet(); renderHome(); toast(it.bought ? 'Marked as bought. Enjoy it!' : 'Moved back to To buy'); };
     s.querySelector('#delBtn').onclick = function () {
       if (!confirm('Delete "' + (it.title || 'this item') + '"?')) return;
-      db.items = db.items.filter(function (i) { return i.id !== it.id; }); persist(); closeSheet(); renderHome(); toast('Item deleted');
+      db.items = db.items.filter(function (i) { return i.id !== it.id; }); api.deleteItem(it.id); closeSheet(); renderHome(); toast('Item deleted');
     };
   }
   function safeLink(u) { return /^https?:\/\//i.test(u || '') ? u : ''; }
@@ -519,21 +675,33 @@
         '<a class="btn block" href="privacy.html">Privacy policy</a>' +
         '<button class="btn block" type="button" id="mOut">Sign out</button>' +
         '<button class="link danger" type="button" id="mDel">Delete my account and stash</button>' +
-      '</div><p class="fine">Test version. Everything is saved in this browser only.</p>');
-    s.querySelector('#curSel').onchange = function (e) { user.currency = e.target.value; saveUser(); renderHome(); toast('New items will use ' + user.currency); };
+      '</div><p class="fine">' + (CLOUD ? 'Your stash is synced to your account.' : 'Test version. Everything is saved in this browser only.') + '</p>');
+    s.querySelector('#curSel').onchange = function (e) { user.currency = e.target.value; api.saveProfile(); renderHome(); toast('New items will use ' + user.currency); };
     s.querySelector('#mSetup').onclick = openSetup;
     s.querySelector('#mOut').onclick = signOut;
     s.querySelector('#mDel').onclick = function () {
       if (!confirm('Delete your account and everything in your stash on this device? This can\'t be undone.')) return;
-      var users = load(KEY.users, {}); delete users[user.email]; save(KEY.users, users);
-      try { localStorage.removeItem(KEY.data(user.id)); } catch (e) {}
-      signOut(); toast('Account deleted');
+      deleteAccount();
     };
   }
 
+  async function deleteAccount() {
+    if (CLOUD) {
+      try {
+        var l = await sb.storage.from('photos').list(user.id, { limit: 1000 });
+        if (l.data && l.data.length) await sb.storage.from('photos').remove(l.data.map(function (f) { return user.id + '/' + f.name; }));
+      } catch (e) {}
+      var r = await sb.rpc('delete_my_account');
+      if (r.error) return toast("Couldn't delete your account. " + friendly(r.error));
+    } else {
+      var users = load(KEY.users, {}); delete users[user.email]; save(KEY.users, users);
+      try { localStorage.removeItem(KEY.data(user.id)); } catch (e) {}
+    }
+    await signOut(); toast('Account deleted');
+  }
+
   function openSetup() {
-    var base = location.origin + location.pathname.replace(/index\.html$/, '');
-    var shareUrl = base + '?url=';
+    var shareUrl = base() + '?url=';
     var isAndroid = /Android/i.test(navigator.userAgent);
     var iphone =
       '<h3>iPhone and iPad (one-time, about 2 minutes)</h3>' +
@@ -545,7 +713,7 @@
         '<li>Done! In Safari, Instagram or TikTok tap <b>Share</b>, scroll down and tap <b>Stashd</b>.</li>' +
       '</ol>' +
       '<code class="copy" id="shareLink">' + esc(shareUrl) + '</code><button class="btn block" type="button" id="copyBtn">Copy link</button>' +
-      '<p class="hint">Use Stashd in Safari rather than from a home-screen icon. On iPhone, a home-screen web app keeps a separate stash.</p>';
+      (CLOUD ? '' : '<p class="hint">Use Stashd in Safari rather than from a home-screen icon. On iPhone, a home-screen web app keeps a separate stash.</p>');
     var android =
       '<h3>Android</h3>' +
       '<ol class="steps">' +
@@ -563,11 +731,28 @@
   }
 
   /* ---------- start ---------- */
-  function boot() {
+  async function boot() {
     var p = new URLSearchParams(location.search);
     var shared = extractUrl([p.get('url'), p.get('text'), p.get('title')].filter(Boolean).join(' '));
-    if (location.search) history.replaceState(null, '', location.pathname + location.hash);
+    if (p.has('url') || p.has('text') || p.has('title')) {
+      ['url', 'text', 'title'].forEach(function (k) { p.delete(k); });
+      var q = p.toString();
+      history.replaceState(null, '', location.pathname + (q ? '?' + q : '') + location.hash);
+    }
     if (shared) { try { sessionStorage.setItem(KEY.pending, shared); } catch (e) {} }
+    if (CLOUD) {
+      if (!window.supabase || !window.supabase.createClient) {
+        app.innerHTML = '<div class="empty"><h2>Can\'t reach Stashd</h2><p>Check your connection and reload the page.</p></div>';
+        return;
+      }
+      sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseKey);
+      sb.auth.onAuthStateChange(function (ev) { if (ev === 'PASSWORD_RECOVERY') setTimeout(openNewPassword, 0); });
+      var got = await sb.auth.getSession();
+      var ses = got && got.data && got.data.session;
+      if (ses) startCloud(ses.user, location.hash.indexOf('type=signup') >= 0 ? 'Email confirmed. Welcome to Stashd!' : '');
+      else renderAuth();
+      return;
+    }
     var sid = load(KEY.session, null), users = load(KEY.users, {});
     var u = sid && Object.keys(users).map(function (k) { return users[k]; }).find(function (x) { return x.id === sid; });
     if (u) signIn(u); else renderAuth();
