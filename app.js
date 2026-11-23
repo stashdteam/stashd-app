@@ -69,6 +69,7 @@
     deleteBoard: function (id) { return CLOUD ? sb.from('boards').delete().eq('id', id).then(done, syncFail) : Promise.resolve(persist()); },
     saveProfile: function () {
       if (!CLOUD) { saveUser(); return Promise.resolve(true); }
+      sb.from('profiles').update({ name: user.name, currency: user.currency }).eq('id', user.id).then(function () {});
       return sb.auth.updateUser({ data: { name: user.name, currency: user.currency } }).then(done, syncFail);
     },
     photo: function (it, dataUrl) {
@@ -109,6 +110,17 @@
     } catch (e) {}
     return c ? c.r : null;
   }
+  // Starting currency for a new account, from the phone's time zone / language. People can change it on their profile.
+  function defaultCurrency() {
+    var tz = ''; try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
+    var TZ = { 'Africa/Cairo': 'EGP', 'Europe/London': 'GBP', 'Asia/Dubai': 'AED', 'Asia/Riyadh': 'SAR', 'Asia/Kuwait': 'KWD', 'Asia/Qatar': 'QAR' };
+    if (TZ[tz]) return TZ[tz];
+    if (/^Europe\/(Paris|Berlin|Madrid|Rome|Amsterdam|Brussels|Vienna|Dublin|Lisbon|Helsinki|Athens|Luxembourg)$/.test(tz)) return 'EUR';
+    var region = ((navigator.language || '').split('-')[1] || '').toUpperCase();
+    var RG = { EG: 'EGP', GB: 'GBP', AE: 'AED', SA: 'SAR', KW: 'KWD', QA: 'QAR', US: 'USD', DE: 'EUR', FR: 'EUR', ES: 'EUR', IT: 'EUR', NL: 'EUR', IE: 'EUR' };
+    return RG[region] || (/^America\//.test(tz) ? 'USD' : 'USD');
+  }
+  function myCurrency() { return (user && user.currency) || defaultCurrency(); }
   function cachedRate(from, to) { var c = fxMem[to] || load('stashd:fx:' + to, null); return c && c.r && c.r[from] ? c.r[from] : null; }
   async function convert(amount, from, to) {
     if (amount == null || !from || !to) return null;
@@ -119,7 +131,7 @@
   // An item's price in my currency (for totals and budgets).
   function homeAmt(it) {
     if (it.price == null) return null;
-    var home = (user && user.currency) || 'EGP';
+    var home = myCurrency();
     if (!it.currency || it.currency === home) return +it.price;
     if (it.home_currency === home && it.home_price != null) return +it.home_price;
     var rt = cachedRate(it.currency, home);
@@ -371,7 +383,7 @@
       if (up) {
         if (users[email]) return (err.textContent = 'There\'s already an account with that email on this device. Sign in instead.');
         var salt = uid();
-        users[email] = { id: uid(), name: name, email: email, salt: salt, hash: await hash(pw, salt), currency: 'EGP', created_at: new Date().toISOString() };
+        users[email] = { id: uid(), name: name, email: email, salt: salt, hash: await hash(pw, salt), currency: defaultCurrency(), created_at: new Date().toISOString() };
         if (!save(KEY.users, users)) return;
         if (news) subscribeBrevo(email);
         signIn(users[email], 'Welcome to Stashd, ' + name + '!');
@@ -443,7 +455,7 @@
     var actions = document.getElementById('authActions');
     try {
       if (up) {
-        var r = await sb.auth.signUp({ email: email, password: pw, options: { data: { currency: 'EGP' }, emailRedirectTo: base() } });
+        var r = await sb.auth.signUp({ email: email, password: pw, options: { data: { currency: defaultCurrency() }, emailRedirectTo: base() } });
         if (r.error) { err.textContent = friendly(r.error); return; }
         // Supabase hides whether an email is taken: an existing account comes back with no identities.
         if (r.data.user && Array.isArray(r.data.user.identities) && r.data.user.identities.length === 0) {
@@ -510,12 +522,12 @@
   }
   async function startCloud(au, msg) {
     var md = au.user_metadata || {};
-    user = { id: au.id, email: au.email, name: md.name || md.full_name || md.given_name || (au.email || '').split('@')[0], currency: md.currency || 'EGP' };
+    user = { id: au.id, email: au.email, name: md.name || md.full_name || md.given_name || (au.email || '').split('@')[0], currency: String(md.currency || '').toUpperCase() || defaultCurrency() };
     app.innerHTML = '<p class="boot loading" style="justify-content:center">Loading your stash…</p>';
     var BCOLS = 'id,user_id,name,visibility,link_token,in_budget,budget,created_at';
     var res = await Promise.all([
       sb.from('boards').select(BCOLS).eq('user_id', au.id).order('created_at'),
-      sb.from('profiles').select('username,name').eq('id', au.id).maybeSingle(),
+      sb.from('profiles').select('username,name,currency').eq('id', au.id).maybeSingle(),
       sb.from('board_members').select('role,b:boards(' + BCOLS + ')').eq('user_id', au.id)
     ]).catch(function (e) { return [{ error: e }, {}, {}]; });
     var ownIds = (res[0].data || []).map(function (b) { return b.id; });
@@ -527,7 +539,8 @@
       document.getElementById('retry').onclick = function () { startCloud(au, msg); };
       return;
     }
-    if (res[1].data) { user.username = res[1].data.username || ''; if (res[1].data.name) user.name = res[1].data.name; }
+    if (res[1].data) { user.username = res[1].data.username || ''; if (res[1].data.name) user.name = res[1].data.name; if (res[1].data.currency) user.currency = res[1].data.currency; }
+    if (res[1].data && !res[1].data.currency) sb.from('profiles').update({ currency: user.currency }).eq('id', au.id).then(function () {});
     var shared = (res[2].data || []).filter(function (m) { return m.b; }).map(function (m) { return Object.assign({}, m.b, { role: m.role }); });
     if (shared.length) {
       var owners = await sb.from('profiles').select('id,username,name').in('id', shared.map(function (b) { return b.user_id; }));
@@ -683,7 +696,7 @@
   }
 
   function priceHtml(it) {
-    var home = user.currency || 'EGP';
+    var home = myCurrency();
     var curOpts = CURRENCIES.indexOf(it.currency) < 0 && it.currency ? [it.currency].concat(CURRENCIES) : CURRENCIES;
     return '<div class="pricebox">' +
       '<div class="pr3"><label class="field"><span>Price</span><input type="text" inputmode="decimal" data-f="price" value="' + (it.price == null ? '' : it.price) + '" placeholder="0"></label>' +
@@ -696,7 +709,7 @@
   }
   // Keeps the converted price in step with price/currency unless the user typed it in themselves.
   function bindPrice(root, it, onChange) {
-    var home = user.currency || 'EGP', box = root.querySelector('[data-conv]'), input = root.querySelector('[data-home]'), note = root.querySelector('[data-convnote]');
+    var home = myCurrency(), box = root.querySelector('[data-conv]'), input = root.querySelector('[data-home]'), note = root.querySelector('[data-convnote]');
     if (!box) return function () {};
     var manual = false, seq = 0;
     input.addEventListener('input', function () { manual = true; it.home_price = num(input.value); it.home_currency = home; note.textContent = 'Typed in by you.'; onChange('home_price'); });
@@ -904,7 +917,7 @@
     var dupe = db.items.find(function (i) { return i.url === url; });
     var it = {
       id: uid(), user_id: user.id, board_id: ['owner', 'editor'].indexOf(roleOf(ui.board)) >= 0 ? ui.board : (db.boards[0] ? db.boards[0].id : null),
-      url: url, title: '', brand: hostBrand(url), image_url: '', price: null, was_price: null, currency: user.currency || 'EGP',
+      url: url, title: '', brand: hostBrand(url), image_url: '', price: null, was_price: null, currency: myCurrency(),
       size: '', note: '', sold_out: false, bought: false, created_at: '', sizes: []
     };
     var s = sheet('<h2>' + (src ? 'Save to my stash' : 'Save to Stashd') + '</h2><div id="prev">' + previewHtml(it) + '</div><div id="saveBody"><p class="loading muted">Reading the link…</p></div>');
@@ -1081,7 +1094,7 @@
   function openMenu() {
     var s = sheet('<h2>' + esc(user.name) + '</h2><p class="muted" style="margin-top:-.6rem;margin-bottom:1rem">' + (user.username ? '@' + esc(user.username) + ' · ' : '') + esc(user.email) + '</p>' +
       (CLOUD ? '<div class="row" style="margin-bottom:1rem"><button class="btn" type="button" id="mProfile">My profile</button><button class="btn" type="button" id="mPeople">Find people</button></div>' : '') +
-      '<label class="field"><span>Default currency</span><select id="curSel">' + CURRENCIES.map(function (c) { return '<option' + (c === user.currency ? ' selected' : '') + '>' + c + '</option>'; }).join('') + '</select></label>' +
+      '<label class="field"><span>Your currency</span><select id="curSel">' + CURRENCIES.map(function (c) { return '<option' + (c === user.currency ? ' selected' : '') + '>' + c + '</option>'; }).join('') + '</select></label>' +
       '<div class="stack">' +
         '<button class="btn block" type="button" id="mSetup">Set up Share to Stashd</button>' +
         '<a class="btn block" href="privacy.html">Privacy policy</a>' +
@@ -1697,6 +1710,8 @@
         '<label class="field"><span>Name</span><input type="text" name="name" autocomplete="name" autocapitalize="words" maxlength="50" value="' + esc(name0) + '"><small class="ferr" id="nmErr"></small></label>' +
         '<label class="field"><span>Username</span><span class="at"><input type="text" name="username" autocapitalize="off" autocomplete="username" spellcheck="false" maxlength="20" value="' + esc(suggestUsername(name0)) + '"></span>' +
         '<small class="ferr" id="unErr"></small><small class="fok" id="unOk"></small><small class="help">Letters, numbers, dots and underscores.</small></label>' +
+        '<label class="field"><span>Your currency</span><select name="currency">' + CURRENCIES.concat(CURRENCIES.indexOf(myCurrency()) < 0 ? [myCurrency()] : []).map(function (c) { return '<option' + (c === myCurrency() ? ' selected' : '') + '>' + c + '</option>'; }).join('') + '</select>' +
+          '<small class="help">Totals and budgets use this. Prices in other currencies are converted to it.</small></label>' +
         '<button class="btn primary block" type="submit">Continue</button></form>', { locked: true });
     var nameIn = s.querySelector('[name=name]'), input = s.querySelector('[name=username]'), edited = false;
     var st = bindUsername(input, s.querySelector('#unErr'), s.querySelector('#unOk'));
@@ -1711,9 +1726,10 @@
       if (!name) return nameIn.focus();
       if (!(await st.check())) return input.focus();
       var u = cleanUsername(input.value);
-      var r = await sb.from('profiles').upsert({ id: user.id, username: u, name: name });
+      var curPick = s.querySelector('[name=currency]').value;
+      var r = await sb.from('profiles').upsert({ id: user.id, username: u, name: name, currency: curPick });
       if (r.error) { s.querySelector('#unErr').textContent = /duplicate|unique/i.test(r.error.message) ? '@' + u + ' was just taken. Try another.' : friendly(r.error); return; }
-      user.username = u; user.name = name; api.saveProfile(); closeSheet(); toast('Welcome, ' + name.split(' ')[0] + '!'); route();
+      user.username = u; user.name = name; user.currency = curPick; api.saveProfile(); closeSheet(); toast('Welcome, ' + name.split(' ')[0] + '!'); route();
     };
   }
 

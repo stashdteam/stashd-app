@@ -206,25 +206,40 @@ export async function readLink(u: URL): Promise<Product> {
 
 /* ---------------- price checks ---------------- */
 type Item = Record<string, any>;
-type Note = { kind: "price_drop" | "price_up" | "back_in_stock" | "sold_out"; old_price: number | null; new_price: number | null };
+type Note = { kind: "price_drop" | "price_up" | "back_in_stock" | "sold_out"; old_price: number | null; new_price: number | null; currency: string | null };
+// conv: the owner's profile currency, and the old / new price converted into it (null if no rate).
+type Conv = { home: string; oldHome: number | null; newHome: number | null };
 
 // What changes for a saved item after re-reading its page. Pure, so it's easy to test.
-export function planUpdate(item: Item, res: Product, now: string) {
+export function planUpdate(item: Item, res: Product, now: string, conv: Conv = { home: "", oldHome: null, newHome: null }) {
   const upd: Record<string, unknown> = { last_checked_at: now, check_status: res.ok ? "ok" : (res.error || "failed") };
   const notes: Note[] = [];
   if (!res.ok) return { upd, notes, hist: null as Record<string, unknown> | null };   // blocked / unreadable: keep the saved price
   const itemCur = String(item.currency || "").toUpperCase(), resCur = String(res.currency || "").toUpperCase();
-  const sameCurrency = !itemCur || !resCur || itemCur === resCur;                     // never mix currencies (e.g. a store showing GBP to our server)
+  const newCur = resCur || itemCur;
+  const currencyChanged = !!itemCur && !!resCur && itemCur !== resCur;              // e.g. the store now shows GBP instead of EUR
   const old = item.price == null ? null : Number(item.price);
-  if (res.price != null && sameCurrency && (old == null || Math.abs(old - res.price) >= 0.01)) {
-    upd.price = res.price; upd.prev_price = old; upd.price_changed_at = now;
-    upd.was_price = res.was_price ?? null;
-    if (!itemCur && resCur) upd.currency = resCur;
-    if (old != null) notes.push({ kind: res.price < old ? "price_drop" : "price_up", old_price: old, new_price: res.price });
+  if (res.price != null && (currencyChanged || old == null || Math.abs(old - res.price) >= 0.01)) {
+    upd.price = res.price; upd.was_price = res.was_price ?? null; upd.price_changed_at = now;
+    if (newCur && newCur !== itemCur) upd.currency = newCur;
+    if (!currencyChanged) {
+      upd.prev_price = old;
+      if (old != null) notes.push({ kind: res.price < old ? "price_drop" : "price_up", old_price: old, new_price: res.price, currency: newCur || null });
+    } else {
+      upd.prev_price = null;                                                          // old and new prices aren't comparable directly…
+      const { oldHome, newHome, home } = conv;                                         // …so compare them in the profile currency (ignore < 2% rate noise)
+      if (oldHome && newHome != null && Math.abs(newHome - oldHome) / oldHome > 0.02) {
+        notes.push({ kind: newHome < oldHome ? "price_drop" : "price_up", old_price: oldHome, new_price: newHome, currency: home || null });
+      }
+    }
+  }
+  // Converted price, always in the owner's current profile currency
+  if (conv.home && conv.newHome != null && (upd.price != null || item.home_currency !== conv.home)) {
+    upd.home_price = conv.newHome; upd.home_currency = conv.home;
   }
   if (typeof res.sold_out === "boolean" && res.sold_out !== !!item.sold_out) {
     upd.sold_out = res.sold_out;
-    notes.push({ kind: res.sold_out ? "sold_out" : "back_in_stock", old_price: null, new_price: (upd.price as number) ?? old });
+    notes.push({ kind: res.sold_out ? "sold_out" : "back_in_stock", old_price: null, new_price: (upd.price as number) ?? old, currency: newCur || null });
   }
   const hist = { item_id: item.id, price: (upd.price as number) ?? old, currency: (upd.currency as string) || itemCur || null, sold_out: (upd.sold_out as boolean) ?? !!item.sold_out, checked_at: now };
   return { upd, notes, hist };
@@ -257,22 +272,37 @@ async function toHome(amount: number, from: string, home: string): Promise<numbe
 }
 
 // Re-read one item and save what changed. Notifications only for scheduled checks (the user sees manual ones right away).
+// The owner's currency from their profile (falls back to what the item was converted to before).
+const profileCurrency = new Map<string, string>();
+async function ownerCurrency(item: Item): Promise<string> {
+  if (!profileCurrency.has(item.user_id)) {
+    const { data } = await admin().from("profiles").select("currency").eq("id", item.user_id).maybeSingle();
+    profileCurrency.set(item.user_id, String(data?.currency || "").toUpperCase());
+  }
+  return profileCurrency.get(item.user_id) || String(item.home_currency || "").toUpperCase();
+}
+
+// Re-read one item and save what changed. Notifications only for scheduled checks (the user sees manual ones right away).
 async function checkItem(item: Item, notify: boolean) {
   const u = safeUrl(item.url || "");
   const res: Product = u ? await readLink(u).catch(() => ({ ok: false, error: "failed" })) : { ok: false, error: "bad_url" };
   const now = new Date().toISOString();
-  const { upd, notes, hist } = planUpdate(item, res, now);
-  if (upd.price != null && item.home_currency) {
-    const cur = String(upd.currency || item.currency || "");
-    const hp = await toHome(upd.price as number, cur, item.home_currency);
-    if (hp != null) upd.home_price = hp;
+  const home = await ownerCurrency(item);
+  const itemCur = String(item.currency || "").toUpperCase();
+  const newCur = String(res.currency || "").toUpperCase() || itemCur;
+  const conv: Conv = { home, oldHome: null, newHome: null };
+  if (home && res.ok) {
+    conv.oldHome = item.home_currency === home && item.home_price != null ? Number(item.home_price)
+      : item.price != null ? await toHome(Number(item.price), itemCur || home, home) : null;
+    conv.newHome = res.price != null ? await toHome(res.price, newCur || home, home) : conv.oldHome;
   }
+  const { upd, notes, hist } = planUpdate(item, res, now, conv);
   const { data: saved } = await admin().from("items").update(upd).eq("id", item.id).select("*").maybeSingle();
   if (hist) await admin().from("price_history").insert(hist);
   if (notify && notes.length && !item.bought) {
     await admin().from("notifications").insert(notes.map((n) => ({
       user_id: item.user_id, item_id: item.id, kind: n.kind, old_price: n.old_price, new_price: n.new_price,
-      currency: (upd.currency as string) || item.currency || null, title: String(item.title || "").slice(0, 140),
+      currency: n.currency, title: String(item.title || "").slice(0, 140),
     })));
   }
   return { status: res.ok ? "ok" : (res.error || "failed"), item: saved || { ...item, ...upd }, changes: notes };
