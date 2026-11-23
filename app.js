@@ -141,6 +141,36 @@
 
   function hasPending() { try { return !!sessionStorage.getItem(KEY.pending); } catch (e) { return false; } }
   function takePending() { try { var v = sessionStorage.getItem(KEY.pending); sessionStorage.removeItem(KEY.pending); return v; } catch (e) { return ''; } }
+  function takePendingData() {
+    try { var v = sessionStorage.getItem('stashd:pendingData'); sessionStorage.removeItem('stashd:pendingData'); return v ? JSON.parse(v) : null; } catch (e) { return null; }
+  }
+
+  /* Details sent by the iPhone Shortcut, read from the page in the user's own Safari (shortcut.js). */
+  var CUR_SIGNS = [[/£/, 'GBP'], [/€/, 'EUR'], [/US\$|\$/, 'USD'], [/EGP|L\.?E\b|ج\.?م/i, 'EGP'], [/SAR|ر\.?س/i, 'SAR'], [/AED|د\.?إ/i, 'AED'], [/KWD|د\.?ك/i, 'KWD'], [/QAR|ر\.?ق/i, 'QAR']];
+  function amount(v) {
+    if (v == null || v === '') return null;
+    if (typeof v === 'number') return isFinite(v) ? v : null;
+    var s = String(v).replace(/[^\d.,]/g, '');
+    if (/,\d{1,2}$/.test(s) && !/\.\d{1,2}$/.test(s)) s = s.replace(/\./g, '').replace(',', '.'); else s = s.replace(/,/g, '');
+    var n = parseFloat(s); return isFinite(n) && n > 0 ? n : null;
+  }
+  function currencyIn(s) { for (var i = 0; i < CUR_SIGNS.length; i++) if (CUR_SIGNS[i][0].test(s || '')) return CUR_SIGNS[i][1]; return ''; }
+  function fromShortcut(d) {
+    if (!d || typeof d !== 'object') return null;
+    var base = extractUrl(d.u) || '';
+    var out = {
+      ok: !!(d.t && String(d.t).trim()), viaShortcut: true,
+      title: String(d.t || '').replace(/\s*[|–-]\s*(zara|h&m|mango)[^|–-]*$/i, '').trim().slice(0, 140),
+      brand: String(d.b || '').trim().slice(0, 60),
+      image_url: absUrl(d.i, base),
+      price: amount(d.p) != null ? amount(d.p) : amount(d.pt),
+      was_price: amount(d.wt),
+      currency: String(d.c || currencyIn(d.pt) || currencyIn(d.wt) || '').toUpperCase().slice(0, 3),
+      sold_out: d.s === true
+    };
+    if (out.was_price != null && (out.price == null || out.was_price <= out.price)) out.was_price = null;
+    return out;
+  }
 
   /* ---- validation ---- */
   var EMAIL_RE = /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/;
@@ -484,8 +514,8 @@
   function afterSignIn(msg) {
     ui = { board: 'all', tab: 'tobuy' };
     route();
-    var p = takePending();
-    if (p) openSave(p); else if (msg) toast(msg);
+    var p = takePending(), pre = takePendingData();
+    if (p) openSave(p, pre); else if (msg) toast(msg);
   }
   async function signOut() {
     if (CLOUD) { try { await sb.auth.signOut(); } catch (e) {} }
@@ -720,7 +750,7 @@
     s.querySelector('#setupBtn').onclick = openSetup;
   }
 
-  async function openSave(url) {
+  async function openSave(url, pre) {
     var dupe = db.items.find(function (i) { return i.url === url; });
     var it = {
       id: uid(), user_id: user.id, board_id: ['owner', 'editor'].indexOf(roleOf(ui.board)) >= 0 ? ui.board : (db.boards[0] ? db.boards[0].id : null),
@@ -728,7 +758,12 @@
       size: '', note: '', sold_out: false, bought: false, created_at: '', sizes: []
     };
     var s = sheet('<h2>Save to Stashd</h2><div id="prev">' + previewHtml(it) + '</div><div id="saveBody"><p class="loading muted">Reading the link…</p></div>');
-    var info = await readLink(url).catch(function () { return { ok: false }; });
+    var info = fromShortcut(pre);
+    if (!info || !info.ok || info.price == null) {     // nothing (or no price) from the Shortcut: try the reader too
+      var more = await readLink(url).catch(function () { return { ok: false }; });
+      if (!info || !info.ok) info = more;
+      else ['image_url', 'price', 'was_price', 'currency', 'sizes', 'brand'].forEach(function (k) { if ((info[k] == null || info[k] === '') && more[k] != null && more[k] !== '') info[k] = more[k]; });
+    }
     if (!document.body.contains(s)) return;
     ['title', 'brand', 'image_url', 'price', 'was_price', 'sold_out', 'sizes'].forEach(function (k) { if (info[k] != null && info[k] !== '') it[k] = info[k]; });
     if (info.currency) it.currency = String(info.currency).toUpperCase();
@@ -744,7 +779,7 @@
     var READER = { not_deployed: 'not found. Check it\'s deployed and named exactly read-link.', auth: 'refused the request. Sign out and back in, then try again.',
       blocked: 'the store blocked it.', no_product: 'it opened the page but found no product details.', unreachable: 'it couldn\'t open the page.',
       not_a_page: 'the link isn\'t a web page.', bad_url: 'the link isn\'t valid.', timeout: 'it took too long.' };
-    var readerLine = info.viaReader ? 'Read by the Stashd reader.' : info.reader ? 'Stashd reader: ' + (READER[info.reader] || info.reader) : '';
+    var readerLine = info.viaShortcut ? 'Read from the page in your Safari.' : info.viaReader ? 'Read by the Stashd reader.' : info.reader ? 'Stashd reader: ' + (READER[info.reader] || info.reader) : '';
     body.innerHTML = (hint ? '<p class="hint">' + esc(hint) + '</p>' : '') + (readerLine ? '<p class="muted small" style="margin-top:.5rem">' + esc(readerLine) + '</p>' : '') +
       (dupe ? '<p class="hint">You already stashed this link. Saving again adds a second copy.</p>' : '') +
       '<h3>Board</h3>' + boardChips(it) + sizeHtml(it) +
@@ -854,18 +889,32 @@
   }
 
   function openSetup() {
-    var shareUrl = base() + '?url=';
+    var linkUrl = base() + '?url=', pageUrl = base() + '?d=', script = '';
     var isAndroid = /Android/i.test(navigator.userAgent);
-    var iphone =
-      '<h3>iPhone and iPad (one-time, about 2 minutes)</h3>' +
+    var safari =
+      '<h3>iPhone: from Safari (best for stores like Zara)</h3>' +
+      '<p class="muted small">Reads the product right from the page you\'re looking at, so stores can\'t block it. About 5 minutes, one time.</p>' +
       '<ol class="steps">' +
-        '<li>Open the <b>Shortcuts</b> app and tap <b>+</b> to make a new shortcut.</li>' +
-        '<li>Search for the action <b>URL Encode</b> and add it. Tap its blue input and choose <b>Shortcut Input</b>.</li>' +
-        '<li>Add the action <b>Open URLs</b>. In its box, paste the link below, then tap the variable bar and add <b>URL Encoded Text</b> right after it.</li>' +
-        '<li>Tap the shortcut name at the top, rename it <b>Stashd</b>, then tap <b>ⓘ</b> and turn on <b>Show in Share Sheet</b>.</li>' +
-        '<li>Done! In Safari, Instagram or TikTok tap <b>Share</b>, scroll down and tap <b>Stashd</b>.</li>' +
+        '<li>Open the <b>Settings</b> app → <b>Apps</b> → <b>Shortcuts</b> → <b>Advanced</b> and turn on <b>Allow Running Scripts</b>.</li>' +
+        '<li>In the <b>Shortcuts</b> app tap <b>+</b>. Tap <b>ⓘ</b> and turn on <b>Show in Share Sheet</b>. At the top, tap the input types and choose only <b>Safari web pages</b>.</li>' +
+        '<li>Add the action <b>Run JavaScript on Web Page</b>. Tap its code, select all, delete, and paste the script (button below).</li>' +
+        '<li>Add <b>URL Encode</b>. Its input should be <b>JavaScript Result</b>.</li>' +
+        '<li>Add <b>Open URLs</b>. Paste the link below, then add <b>URL Encoded Text</b> right after it.</li>' +
+        '<li>Name the shortcut <b>Stashd</b>. On a product page in Safari tap <b>Share</b> → <b>Stashd</b>. The first time, tap <b>Allow</b>.</li>' +
       '</ol>' +
-      '<code class="copy" id="shareLink">' + esc(shareUrl) + '</code><button class="btn block" type="button" id="copyBtn">Copy link</button>' +
+      '<div class="row"><button class="btn" type="button" id="copyScript" disabled>Copy script</button><button class="btn" type="button" data-copy="' + esc(pageUrl) + '">Copy link</button></div>' +
+      '<code class="copy">' + esc(pageUrl) + '</code>';
+    var apps =
+      '<h3>iPhone: from Instagram, TikTok and other apps</h3>' +
+      '<p class="muted small">Those apps share just the link, so make a second, simpler shortcut.</p>' +
+      '<ol class="steps">' +
+        '<li>In <b>Shortcuts</b> tap <b>+</b>, tap <b>ⓘ</b> and turn on <b>Show in Share Sheet</b>.</li>' +
+        '<li>Add <b>URL Encode</b> with input <b>Shortcut Input</b>.</li>' +
+        '<li>Add <b>Open URLs</b>: paste the link below, then add <b>URL Encoded Text</b> after it.</li>' +
+        '<li>Name it <b>Stashd link</b>. In any app tap <b>Share</b> → <b>Stashd link</b>.</li>' +
+      '</ol>' +
+      '<div class="row"><button class="btn" type="button" data-copy="' + esc(linkUrl) + '">Copy link</button></div>' +
+      '<code class="copy">' + esc(linkUrl) + '</code>' +
       (CLOUD ? '' : '<p class="hint">Use Stashd in Safari rather than from a home-screen icon. On iPhone, a home-screen web app keeps a separate stash.</p>');
     var android =
       '<h3>Android</h3>' +
@@ -875,13 +924,24 @@
         '<li>Now tap <b>Share</b> in any app and pick <b>Stashd</b>.</li>' +
       '</ol>';
     var s = sheet('<h2>Share to Stashd</h2><p class="muted">Save things from any app without copy-pasting into WhatsApp.</p>' +
-      (isAndroid ? android + iphone : iphone + android) +
-      '<h3>Anywhere</h3><p class="muted">Copy the product link, open Stashd and tap <b>+</b> then <b>Paste</b>.</p>');
-    s.querySelector('#copyBtn').onclick = function () {
-      (navigator.clipboard ? navigator.clipboard.writeText(shareUrl) : Promise.reject()).then(function () { toast('Link copied'); })
-        .catch(function () { var r = document.createRange(); r.selectNodeContents(s.querySelector('#shareLink')); var sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); toast('Select and copy the link'); });
+      (isAndroid ? android + safari + apps : safari + apps + android) +
+      '<h3>Anywhere</h3><p class="muted">Copy the product link, open Stashd and tap <b>+</b> then <b>Paste</b>.</p>' +
+      '<textarea class="copy" id="scriptBox" readonly rows="4" aria-label="Shortcut script" style="margin-top:.6rem;font-family:ui-monospace,monospace;font-size:.75rem"></textarea>');
+    function copy(text, label) {
+      (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(function () { toast(label + ' copied'); })
+        .catch(function () { window.prompt('Copy this', text); });
+    }
+    s.querySelectorAll('[data-copy]').forEach(function (b) { b.onclick = function () { copy(b.dataset.copy, 'Link'); }; });
+    var cs = s.querySelector('#copyScript'), box = s.querySelector('#scriptBox');
+    fetch('shortcut.js?v=' + Date.now()).then(function (r) { return r.text(); }).then(function (txt) {
+      script = txt; box.value = txt; cs.disabled = false;
+    }).catch(function () { box.value = 'Couldn\'t load the script. Check your connection.'; });
+    cs.onclick = function () {
+      (navigator.clipboard ? navigator.clipboard.writeText(script) : Promise.reject()).then(function () { toast('Script copied'); })
+        .catch(function () { box.focus(); box.select(); toast('Select all and copy the script below'); });
     };
   }
+
 
   /* ---------- social: usernames, profiles, follows, shared boards ---------- */
   var USERNAME_RE = /^[a-z0-9_.]{3,20}$/;
@@ -1481,8 +1541,11 @@
   async function boot() {
     var p = new URLSearchParams(location.search);
     var shared = extractUrl([p.get('url'), p.get('text'), p.get('title')].filter(Boolean).join(' '));
-    if (p.has('url') || p.has('text') || p.has('title')) {
-      ['url', 'text', 'title'].forEach(function (k) { p.delete(k); });
+    if (p.get('d')) {            // from the Safari Shortcut: product details read on the page
+      try { var d = JSON.parse(p.get('d')); shared = extractUrl(d.u) || shared; sessionStorage.setItem('stashd:pendingData', JSON.stringify(d)); } catch (e) {}
+    }
+    if (p.has('url') || p.has('text') || p.has('title') || p.has('d')) {
+      ['url', 'text', 'title', 'd'].forEach(function (k) { p.delete(k); });
       var q = p.toString();
       history.replaceState(null, '', location.pathname + (q ? '?' + q : '') + location.hash);
     }
