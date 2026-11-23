@@ -590,6 +590,19 @@
 
   async function readLink(url) {
     var u; try { u = new URL(url); } catch (e) { return { ok: false }; }
+    var blocked = false;
+
+    // 0) Stashd's own link reader (Supabase Edge Function "read-link"), when it's deployed.
+    if (CLOUD && sb && user) {
+      try {
+        var fr = await Promise.race([
+          sb.functions.invoke('read-link', { body: { url: url } }),
+          new Promise(function (res) { setTimeout(function () { res(null); }, 15000); })
+        ]);
+        if (fr && !fr.error && fr.data && fr.data.ok) return Object.assign({}, fr.data, { ok: true });
+        if (fr && fr.data && fr.data.error === 'blocked') blocked = true;
+      } catch (e) {}
+    }
 
     // 1) Shopify stores (e.g. Nesaa) expose product data at /products/<handle>.js
     var m = u.pathname.match(/^(.*?\/products\/[^/?#]+)/);
@@ -636,7 +649,7 @@
         }
       }
     } catch (e) {}
-    return { ok: false };
+    return { ok: false, blocked: blocked };
   }
 
   function parseHtml(html, base) {
@@ -704,7 +717,8 @@
     if (info.currency) it.currency = String(info.currency).toUpperCase();
     if (!it.title) it.title = '';
     var needsHelp = !info.ok || it.price == null;
-    var hint = !info.ok ? "Couldn't read this page automatically. Add the details below."
+    var hint = info.blocked ? 'This store blocks automatic reading, so add the details below. Tip: the price is on the store page.'
+      : !info.ok ? "Couldn't read this page automatically. Add the details below."
       : it.price == null ? 'Got the basics. Add the price below so it counts in your total.' : '';
 
     var prev = s.querySelector('#prev'), body = s.querySelector('#saveBody');
