@@ -80,6 +80,7 @@ function num(v: unknown): number | null {
   const n = parseFloat(s);
   return isFinite(n) ? n : null;
 }
+function symbolCurrency(s: string) { return /£/.test(s) ? "GBP" : /€/.test(s) ? "EUR" : /\$/.test(s) ? "USD" : ""; }
 function decode(s: string) {
   return s.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
     .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d)).replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16))).trim();
@@ -162,6 +163,24 @@ export function parseHtml(html: string, base: URL): Product {
     if (allOffers.length) out.sold_out = allOffers.every((x: any) => /OutOfStock|SoldOut|Discontinued/i.test(String(x?.availability || "")));
     const sizes = variants.map((v: any) => v.size).filter(Boolean).map(String);
     if (sizes.length) out.sizes = [...new Set(sizes)].slice(0, 20);
+  }
+  // Microdata: <span itemprop="price" content="22.00">
+  if (out.price == null) {
+    const ip = html.match(/itemprop=["']price["'][^>]*content=["']([^"']+)["']/i) || html.match(/content=["']([^"']+)["'][^>]*itemprop=["']price["']/i);
+    if (ip) out.price = num(ip[1]);
+    const ic = html.match(/itemprop=["']priceCurrency["'][^>]*content=["']([A-Za-z]{3})["']/i);
+    if (ic && !out.currency) out.currency = ic[1];
+  }
+  // Price data the page loads for its own app (e.g. Sephora: "listPrice":"$22.00")
+  if (out.price == null) {
+    const sale = html.match(/"(?:salePrice|currentPrice|finalPrice)"\s*:\s*"?([£$€]?\s?\d[\d.,]*)/i);
+    const list = html.match(/"(?:listPrice|regularPrice|originalPrice)"\s*:\s*"?([£$€]?\s?\d[\d.,]*)/i) || html.match(/"price"\s*:\s*"([£$€]\s?\d[\d.,]*)"/i);
+    const pick = sale || list;
+    if (pick) {
+      out.price = num(pick[1]);
+      if (sale && list) out.was_price = num(list[1]);
+      if (!out.currency) out.currency = symbolCurrency(pick[1]);
+    }
   }
   if (out.was_price != null && out.price != null && out.was_price <= out.price) out.was_price = null;
   out.title = (out.title || "").slice(0, 200);

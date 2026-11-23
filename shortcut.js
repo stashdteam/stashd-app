@@ -9,8 +9,8 @@ var r = {
   t: q('meta[property="og:title"]') || document.title,
   b: q('meta[property="og:site_name"]'),
   i: q('meta[property="og:image"]'),
-  p: q('meta[property="product:price:amount"]') || q('meta[property="og:price:amount"]'),
-  c: q('meta[property="product:price:currency"]') || q('meta[property="og:price:currency"]')
+  p: q('meta[property="product:price:amount"]') || q('meta[property="og:price:amount"]') || q('[itemprop=price][content]'),
+  c: q('meta[property="product:price:currency"]') || q('meta[property="og:price:currency"]') || q('[itemprop=priceCurrency][content]')
 };
 document.querySelectorAll('script[type="application/ld+json"]').forEach(function (s) {
   try {
@@ -45,6 +45,13 @@ if (!r.p) {
   };
   r.pt = pick(['[itemprop=price]', '[class*="money-amount__main" i]', '[class*="price-current" i]', '[class*="current-price" i]', '[class*="sale-price" i]', '[class*="price__current" i]', '[class*="product-price" i] span', '[class*="price" i] span', '[class*="price" i]'], false);
   r.wt = pick(['[class*="price" i] del', '[class*="price" i] s', 'del', 's', '[class*="old-price" i]', '[class*="price-old" i]', '[class*="compare" i]', '[class*="crossed" i]', '[class*="original-price" i]'], true);
+}
+if (!r.p && !r.pt) {
+  // Price data the page loads for its own app (e.g. Sephora: "listPrice":"$22.00")
+  var all = ''; document.querySelectorAll('script:not([src])').forEach(function (s) { if (all.length < 3e6) all += s.textContent; });
+  var sale = all.match(/"(?:salePrice|currentPrice|finalPrice)"\s*:\s*"?([£$€]?\s?\d[\d.,]*)/i);
+  var list = all.match(/"(?:listPrice|regularPrice|originalPrice)"\s*:\s*"?([£$€]?\s?\d[\d.,]*)/i) || all.match(/"price"\s*:\s*"([£$€]\s?\d[\d.,]*)"/i);
+  if (sale || list) { r.pt = (sale || list)[1]; if (sale && list) r.wt = list[1]; }
 }
 if (r.s == null) r.s = /\b(sold out|out of stock|agotado)\b/i.test(txt(document.querySelector('[class*="stock" i], [class*="availability" i], button[disabled][class*="add" i]')));
 completion(STASHD + '?d=' + encodeURIComponent(JSON.stringify(r)));

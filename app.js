@@ -28,7 +28,7 @@
     return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
   }
   function num(v) { if (v === '' || v == null) return null; var n = parseFloat(String(v).replace(/[^\d.]/g, '')); return isFinite(n) ? n : null; }
-  function fmt(n) { return new Intl.NumberFormat('en', { maximumFractionDigits: 2 }).format(n); }
+  function fmt(n) { var frac = Math.abs(n % 1) > 0.004; return new Intl.NumberFormat('en', { minimumFractionDigits: frac ? 2 : 0, maximumFractionDigits: 2 }).format(n); }
   function money(n, c) { return n == null ? '' : (c ? c + ' ' : '') + fmt(n); }
   function pct(it) { return (it.price != null && it.was_price != null && it.was_price > it.price) ? Math.round((it.was_price - it.price) / it.was_price * 100) : 0; }
   // When a store blocks reading: guess the product name from the link, e.g. ".../100-leather-bomber-jacket-p06318252.html"
@@ -55,7 +55,7 @@
   var CFG = window.STASHD_CONFIG || {};
   var CLOUD = !!(CFG.supabaseUrl && CFG.supabaseKey);
   var sb = null;
-  var COLS = ['id', 'user_id', 'board_id', 'url', 'title', 'brand', 'image_url', 'price', 'was_price', 'currency', 'size', 'sizes', 'note', 'sold_out', 'bought', 'in_budget', 'created_at'];
+  var COLS = ['id', 'user_id', 'board_id', 'url', 'title', 'brand', 'image_url', 'price', 'was_price', 'currency', 'size', 'sizes', 'note', 'sold_out', 'bought', 'in_budget', 'home_price', 'home_currency', 'created_at'];
   function row(it) { var r = {}; COLS.forEach(function (k) { if (it[k] !== undefined) r[k] = it[k]; }); return r; }
   function base() { return location.origin + location.pathname.replace(/index\.html$/, ''); }
   function syncFail(e) { if (window.console) console.error(e); toast("Couldn't sync. " + ((e && e.message) || 'Check your connection.')); return false; }
@@ -65,7 +65,7 @@
     saveItem: function (it) { clearTimeout(saveTimers[it.id]); return CLOUD ? sb.from('items').upsert(row(it)).then(done, syncFail) : Promise.resolve(persist()); },
     saveItemSoon: function (it) { clearTimeout(saveTimers[it.id]); if (!CLOUD) return persist(); saveTimers[it.id] = setTimeout(function () { api.saveItem(it); }, 600); },
     deleteItem: function (id) { clearTimeout(saveTimers[id]); return CLOUD ? sb.from('items').delete().eq('id', id).then(done, syncFail) : Promise.resolve(persist()); },
-    saveBoard: function (b) { return CLOUD ? sb.from('boards').upsert({ id: b.id, user_id: b.user_id, name: b.name, created_at: b.created_at, visibility: b.visibility || 'private', link_token: b.link_token || null, in_budget: b.in_budget !== false }).then(done, syncFail) : Promise.resolve(persist()); },
+    saveBoard: function (b) { return CLOUD ? sb.from('boards').upsert({ id: b.id, user_id: b.user_id, name: b.name, created_at: b.created_at, visibility: b.visibility || 'private', link_token: b.link_token || null, in_budget: b.in_budget !== false, budget: b.budget == null ? null : b.budget }).then(done, syncFail) : Promise.resolve(persist()); },
     deleteBoard: function (id) { return CLOUD ? sb.from('boards').delete().eq('id', id).then(done, syncFail) : Promise.resolve(persist()); },
     saveProfile: function () {
       if (!CLOUD) { saveUser(); return Promise.resolve(true); }
@@ -89,6 +89,60 @@
     if (m) return m[0].replace(/[).,]+$/, '');
     var d = String(text).trim().match(/^(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(\/\S*)?$/i);
     return d ? 'https://' + d[0] : '';
+  }
+
+  /* ---------- money: exchange rates + prices in my currency ---------- */
+  // Rates: ExchangeRate-API open access (daily, attribution required), backup: fawazahmed0 currency feed. Cached per day on the device.
+  var FX_CREDIT = '<a class="fxc" href="https://www.exchangerate-api.com" target="_blank" rel="noopener">Rates By Exchange Rate API</a>';
+  var fxMem = {};
+  async function getRates(base) {
+    base = String(base || '').toUpperCase(); if (!base) return null;
+    var key = 'stashd:fx:' + base, c = fxMem[base] || load(key, null);
+    if (c && Date.now() - c.t < 12 * 3600 * 1000) return (fxMem[base] = c).r;
+    try {
+      var r = await fetchT('https://open.er-api.com/v6/latest/' + base, 8000), j = await r.json();
+      if (j && j.result === 'success' && j.rates) { c = { t: Date.now(), r: j.rates }; fxMem[base] = c; try { localStorage.setItem(key, JSON.stringify(c)); } catch (e) {} return c.r; }
+    } catch (e) {}
+    try {
+      var r2 = await fetchT('https://latest.currency-api.pages.dev/v1/currencies/' + base.toLowerCase() + '.json', 8000), j2 = await r2.json(), m = j2 && j2[base.toLowerCase()];
+      if (m) { var out = {}; Object.keys(m).forEach(function (k) { out[k.toUpperCase()] = m[k]; }); c = { t: Date.now(), r: out }; fxMem[base] = c; try { localStorage.setItem(key, JSON.stringify(c)); } catch (e) {} return out; }
+    } catch (e) {}
+    return c ? c.r : null;
+  }
+  function cachedRate(from, to) { var c = fxMem[to] || load('stashd:fx:' + to, null); return c && c.r && c.r[from] ? c.r[from] : null; }
+  async function convert(amount, from, to) {
+    if (amount == null || !from || !to) return null;
+    if (from === to) return amount;
+    var r = await getRates(to);
+    return r && r[from] ? Math.round(amount / r[from] * 100) / 100 : null;
+  }
+  // An item's price in my currency (for totals and budgets).
+  function homeAmt(it) {
+    if (it.price == null) return null;
+    var home = (user && user.currency) || 'EGP';
+    if (!it.currency || it.currency === home) return +it.price;
+    if (it.home_currency === home && it.home_price != null) return +it.home_price;
+    var rt = cachedRate(it.currency, home);
+    return rt ? Math.round(it.price / rt * 100) / 100 : null;
+  }
+  function homeSum(items) {
+    var sum = 0, missing = 0;
+    items.forEach(function (i) { if (i.price == null) return; var a = homeAmt(i); if (a == null) missing++; else sum += a; });
+    return { sum: sum, missing: missing };
+  }
+  // Best guess at a store's currency from its address, for when the page doesn't say.
+  function guessCurrency(url) {
+    var u; try { u = new URL(url); } catch (e) { return ''; }
+    var h = u.hostname.toLowerCase(), path = u.pathname.toLowerCase();
+    if (/\.co\.uk$|\.uk$/.test(h) || /^\/(uk|gb|en-gb|en_gb)(\/|$)/.test(path)) return 'GBP';
+    if (/\.eg$/.test(h) || /^\/(eg|en-eg|ar-eg)(\/|$)/.test(path)) return 'EGP';
+    if (/\.ae$/.test(h) || /^\/(ae|en-ae|ar-ae)(\/|$)/.test(path)) return 'AED';
+    if (/\.sa$/.test(h) || /^\/(sa|en-sa|ar-sa)(\/|$)/.test(path)) return 'SAR';
+    if (/\.kw$/.test(h)) return 'KWD';
+    if (/\.qa$/.test(h)) return 'QAR';
+    if (/\.(de|fr|it|es|nl|ie|be|at|pt|fi|gr)$/.test(h) || /^\/(de|fr|it|es|nl|ie|eu)(\/|$)/.test(path)) return 'EUR';
+    if (/^\/(us|en-us)(\/|$)/.test(path) || /(^|\.)(sephora|amazon|ulta|nordstrom|target|walmart|macys)\.com$/.test(h)) return 'USD';
+    return '';
   }
 
   function totals(items, fallbackCur) {
@@ -428,7 +482,7 @@
     var md = au.user_metadata || {};
     user = { id: au.id, email: au.email, name: md.name || md.full_name || md.given_name || (au.email || '').split('@')[0], currency: md.currency || 'EGP' };
     app.innerHTML = '<p class="boot loading" style="justify-content:center">Loading your stash…</p>';
-    var BCOLS = 'id,user_id,name,visibility,link_token,in_budget,created_at';
+    var BCOLS = 'id,user_id,name,visibility,link_token,in_budget,budget,created_at';
     var res = await Promise.all([
       sb.from('boards').select(BCOLS).eq('user_id', au.id).order('created_at'),
       sb.from('profiles').select('username,name').eq('id', au.id).maybeSingle(),
@@ -514,6 +568,8 @@
   function afterSignIn(msg) {
     ui = { board: 'all', tab: 'tobuy' };
     route();
+    if (db.items.some(function (i) { return i.currency && i.currency !== user.currency; }))
+      getRates(user.currency).then(function () { if (!document.querySelector('.overlay') && document.querySelector('.home .chips')) renderHome(); });
     var p = takePending(), pre = takePendingData();
     if (p) openSave(p, pre); else if (msg) toast(msg);
   }
@@ -570,14 +626,46 @@
     });
   }
 
-  function detailsHtml(it, open) {
+  function priceHtml(it) {
+    var home = user.currency || 'EGP';
     var curOpts = CURRENCIES.indexOf(it.currency) < 0 && it.currency ? [it.currency].concat(CURRENCIES) : CURRENCIES;
+    return '<div class="pricebox">' +
+      '<div class="pr3"><label class="field"><span>Price</span><input type="text" inputmode="decimal" data-f="price" value="' + (it.price == null ? '' : it.price) + '" placeholder="0"></label>' +
+      '<label class="field"><span>Currency</span><select data-f="currency">' + curOpts.map(function (c) { return '<option' + (c === it.currency ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('') + '</select></label>' +
+      '<label class="field"><span>Old price</span><input type="text" inputmode="decimal" data-f="was_price" value="' + (it.was_price == null ? '' : it.was_price) + '" placeholder="If on sale"></label></div>' +
+      '<div class="conv" data-conv' + (it.currency && it.currency !== home ? '' : ' hidden') + '>' +
+        '<label class="field"><span>In ' + esc(home) + ' (your currency)</span><input type="text" inputmode="decimal" data-home value="' + (it.home_price == null ? '' : it.home_price) + '" placeholder="Converting…"></label>' +
+        '<small class="muted" data-convnote></small></div>' +
+    '</div>';
+  }
+  // Keeps the converted price in step with price/currency unless the user typed it in themselves.
+  function bindPrice(root, it, onChange) {
+    var home = user.currency || 'EGP', box = root.querySelector('[data-conv]'), input = root.querySelector('[data-home]'), note = root.querySelector('[data-convnote]');
+    if (!box) return function () {};
+    var manual = false, seq = 0;
+    input.addEventListener('input', function () { manual = true; it.home_price = num(input.value); it.home_currency = home; note.textContent = 'Typed in by you.'; onChange('home_price'); });
+    async function sync() {
+      var foreign = it.currency && it.currency !== home;
+      box.hidden = !foreign;
+      if (!foreign) { it.home_price = it.price; it.home_currency = home; return; }
+      if (manual || it.price == null) return;
+      var my = ++seq; note.textContent = 'Converting…';
+      var v = await convert(it.price, it.currency, home);
+      if (my !== seq) return;
+      if (v == null) { note.textContent = 'Couldn\'t get today\'s rate. Type the price in ' + home + ' if you know it.'; return; }
+      it.home_price = v; it.home_currency = home; input.value = v;
+      note.innerHTML = '1 ' + esc(it.currency) + ' ≈ ' + esc(fmt(Math.round(v / it.price * 100) / 100)) + ' ' + esc(home) + ' today · ' + FX_CREDIT;
+      onChange('home_price');
+    }
+    if (it.home_price == null || it.home_currency !== home) sync();
+    else note.innerHTML = 'Saved at about ' + esc(fmt(Math.round(it.home_price / (it.price || 1) * 100) / 100)) + ' ' + esc(home) + ' per ' + esc(it.currency) + ' · ' + FX_CREDIT;
+    return function (f) { if (f === 'price' || f === 'currency') { manual = false; sync(); } };
+  }
+
+  function detailsHtml(it, open) {
     return '<details class="edit"' + (open ? ' open' : '') + '><summary>Edit details</summary>' +
       '<label class="field"><span>Title</span><input type="text" data-f="title" value="' + esc(it.title) + '" maxlength="140"></label>' +
       '<label class="field"><span>Store</span><input type="text" data-f="brand" value="' + esc(it.brand) + '" maxlength="60"></label>' +
-      '<div class="two"><label class="field"><span>Price</span><input type="text" inputmode="decimal" data-f="price" value="' + (it.price == null ? '' : it.price) + '"></label>' +
-      '<label class="field"><span>Old price</span><input type="text" inputmode="decimal" data-f="was_price" value="' + (it.was_price == null ? '' : it.was_price) + '" placeholder="If on sale"></label></div>' +
-      '<label class="field"><span>Currency</span><select data-f="currency">' + curOpts.map(function (c) { return '<option' + (c === it.currency ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('') + '</select></label>' +
       '<label class="field"><span>Photo</span><input type="file" accept="image/*" data-photo></label>' +
       '<label class="field"><span>Link</span><input type="url" data-f="url" value="' + esc(it.url) + '" inputmode="url"></label>' +
     '</details>';
@@ -616,12 +704,17 @@
     });
   }
 
+  function convLine(it) {
+    if (!user || it.price == null || !it.currency || it.currency === user.currency) return '';
+    var a = homeAmt(it);
+    return a == null ? '' : '<small class="conv1">≈ ' + esc(money(a, user.currency)) + '</small>';
+  }
   function previewHtml(it) {
     var img = safeImg(it.image_url);
     return '<div class="preview"><div class="pimg' + (img ? '' : ' none') + '">' + (img ? '<img src="' + esc(img) + '" alt="" referrerpolicy="no-referrer">' : letter(it)) + '</div>' +
       '<div><b>' + esc(it.title || 'Untitled item') + '</b>' + (it.brand ? '<small class="brand">' + esc(it.brand) + '</small>' : '') +
       (it.price != null ? '<div class="price">' + esc(money(it.price, it.currency)) + (it.was_price > it.price ? '<s>' + esc(fmt(it.was_price)) + '</s>' : '') + '</div>' : '') +
-      tagsHtml(it, true) + '</div></div>';
+      convLine(it) + tagsHtml(it, true) + '</div></div>';
   }
 
   /* ---------- link reading ---------- */
@@ -750,16 +843,17 @@
     s.querySelector('#setupBtn').onclick = openSetup;
   }
 
-  async function openSave(url, pre) {
+  // url: link to save. pre: details from the Safari Shortcut. src: an existing item to copy (no reading needed).
+  async function openSave(url, pre, src) {
     var dupe = db.items.find(function (i) { return i.url === url; });
     var it = {
       id: uid(), user_id: user.id, board_id: ['owner', 'editor'].indexOf(roleOf(ui.board)) >= 0 ? ui.board : (db.boards[0] ? db.boards[0].id : null),
       url: url, title: '', brand: hostBrand(url), image_url: '', price: null, was_price: null, currency: user.currency || 'EGP',
       size: '', note: '', sold_out: false, bought: false, created_at: '', sizes: []
     };
-    var s = sheet('<h2>Save to Stashd</h2><div id="prev">' + previewHtml(it) + '</div><div id="saveBody"><p class="loading muted">Reading the link…</p></div>');
-    var info = fromShortcut(pre);
-    if (!info || !info.ok || info.price == null) {     // nothing (or no price) from the Shortcut: try the reader too
+    var s = sheet('<h2>' + (src ? 'Save to my stash' : 'Save to Stashd') + '</h2><div id="prev">' + previewHtml(it) + '</div><div id="saveBody"><p class="loading muted">Reading the link…</p></div>');
+    var info = src ? { ok: true, copied: true, title: src.title, brand: src.brand, image_url: src.image_url, price: src.price, was_price: src.was_price, currency: src.currency, sold_out: src.sold_out, sizes: src.sizes || [] } : fromShortcut(pre);
+    if (!src && (!info || !info.ok || info.price == null)) {     // nothing (or no price) from the Shortcut: try the reader too
       var more = await readLink(url).catch(function () { return { ok: false }; });
       if (!info || !info.ok) info = more;
       else ['image_url', 'price', 'was_price', 'currency', 'sizes', 'brand'].forEach(function (k) { if ((info[k] == null || info[k] === '') && more[k] != null && more[k] !== '') info[k] = more[k]; });
@@ -767,6 +861,8 @@
     if (!document.body.contains(s)) return;
     ['title', 'brand', 'image_url', 'price', 'was_price', 'sold_out', 'sizes'].forEach(function (k) { if (info[k] != null && info[k] !== '') it[k] = info[k]; });
     if (info.currency) it.currency = String(info.currency).toUpperCase();
+    else if (guessCurrency(url)) it.currency = guessCurrency(url);
+    if (src && src.size) it.size = src.size;
     if (!it.title) it.title = titleFromUrl(url);
     if (!info.ok && it.brand) it.brand = it.brand.charAt(0).toUpperCase() + it.brand.slice(1);
     var needsHelp = !info.ok || it.price == null;
@@ -779,20 +875,25 @@
     var READER = { not_deployed: 'not found. Check it\'s deployed and named exactly read-link.', auth: 'refused the request. Sign out and back in, then try again.',
       blocked: 'the store blocked it.', no_product: 'it opened the page but found no product details.', unreachable: 'it couldn\'t open the page.',
       not_a_page: 'the link isn\'t a web page.', bad_url: 'the link isn\'t valid.', timeout: 'it took too long.' };
-    var readerLine = info.viaShortcut ? 'Read from the page in your Safari.' : info.viaReader ? 'Read by the Stashd reader.' : info.reader ? 'Stashd reader: ' + (READER[info.reader] || info.reader) : '';
+    var readerLine = info.copied ? '' : info.viaShortcut ? 'Read from the page in your Safari.' : info.viaReader ? 'Read by the Stashd reader.' : info.reader ? 'Stashd reader: ' + (READER[info.reader] || info.reader) : '';
     body.innerHTML = (hint ? '<p class="hint">' + esc(hint) + '</p>' : '') + (readerLine ? '<p class="muted small" style="margin-top:.5rem">' + esc(readerLine) + '</p>' : '') +
       (dupe ? '<p class="hint">You already stashed this link. Saving again adds a second copy.</p>' : '') +
+      '<h3>Price</h3>' + priceHtml(it) +
       '<h3>Board</h3>' + boardChips(it) + sizeHtml(it) +
       '<label class="field" style="margin-top:1rem"><span>Note (optional)</span><textarea data-f="note" maxlength="300" placeholder="Wait for payday? Ask for it as a gift?"></textarea></label>' +
-      detailsHtml(it, needsHelp) +
+      detailsHtml(it, needsHelp && !info.title) +
       '<div class="stack"><button class="btn primary block" type="button" id="stashBtn">Stash it</button></div>';
-    var refresh = function (f) { if (!f || f !== 'note') prev.innerHTML = previewHtml(it); };
+    var priceSync = null;
+    var refresh = function (f) { if (!f || f !== 'note') prev.innerHTML = previewHtml(it); if (priceSync) priceSync(f); };
     bindBoardChips(body, it, refresh); bindSize(body, it, refresh); bindFields(body, it, refresh);
+    priceSync = bindPrice(body, it, refresh);
     body.querySelector('#stashBtn').onclick = async function () {
       var btn = this;
       if (!it.title) it.title = it.brand ? it.brand + ' item' : 'Untitled item';
       it.created_at = new Date().toISOString();
       btn.disabled = true; btn.textContent = 'Stashing…';
+      if (!it.currency || it.currency === user.currency) { it.home_price = it.price; it.home_currency = user.currency; }
+      if (!it.sizes || !it.sizes.length) it.sizes = [];
       db.items.push(it);
       if (!(await api.saveItem(it))) { db.items.pop(); btn.disabled = false; btn.textContent = 'Stash it'; return; }
       if (it.board_id && cache[it.board_id]) cache[it.board_id].unshift(it);
@@ -817,17 +918,20 @@
         (safeLink(it.url) ? '<a class="btn primary" id="openStore" href="' + esc(safeLink(it.url)) + '" target="_blank" rel="noopener noreferrer">Open store page</a>' : '') +
         '<button class="btn" type="button" id="boughtBtn"></button>' +
       '</div>' +
-      (mine ? '<h3>Board</h3>' + boardChips(it) : '') + sizeHtml(it) +
+      '<h3>Price</h3>' + priceHtml(it) +
+      (mine ? '<h3>Board <span class="muted small">· tap one to move it</span></h3>' + boardChips(it) : '') +
+      '<div class="stack" style="margin-top:.6rem"><button class="btn block" type="button" id="copyBtn">Copy to another board</button></div>' +
+      sizeHtml(it) +
       '<label class="field" style="margin-top:1rem"><span>Note</span><textarea data-f="note" maxlength="300" placeholder="Add a note">' + esc(it.note) + '</textarea></label>' +
       switchHtml('soldSw', 'Sold out', '', it.sold_out) +
-      (mine && !(CLOUD && sharedBoard(it.board_id)) ? switchHtml('budgetSw', 'Count in my budget', 'Turn off for gifts, wishes or anything you\'re not paying for.', it.in_budget !== false) : '') +
+      (mine && !(CLOUD && sharedBoard(it.board_id)) ? switchHtml('budgetSw', 'Count in budget and totals', 'Turn off for gifts, wishes or anything you\'re not paying for.', it.in_budget !== false) : '') +
       detailsHtml(it, false) +
       (canDelete ? '<div class="stack"><button class="link danger" type="button" id="delBtn">Delete item</button></div>' : ''));
     var head = s.querySelector('#iHead'), hero = s.querySelector('#iHero'), bb = s.querySelector('#boughtBtn');
     function paint() {
       head.innerHTML = '<h2 style="margin-right:0">' + esc(it.title || 'Untitled item') + '</h2>' +
         '<p class="muted"><span class="brand">' + esc(it.brand) + '</span>' + (it.board_id ? ' · ' + esc(boardName(it.board_id)) : '') + '</p>' +
-        (it.price != null ? '<div class="price">' + esc(money(it.price, it.currency)) + (it.was_price > it.price ? '<s>' + esc(fmt(it.was_price)) + '</s>' : '') + '</div>' : '');
+        (it.price != null ? '<div class="price">' + esc(money(it.price, it.currency)) + (it.was_price > it.price ? '<s>' + esc(fmt(it.was_price)) + '</s>' : '') + '</div>' : '') + convLine(it);
       var t = hero.querySelector('.tags'); if (t) t.remove(); hero.insertAdjacentHTML('beforeend', tagsHtml(it));
       bb.textContent = it.bought ? '↩ Move to To buy' : '✓ Mark as bought';
     }
@@ -837,9 +941,14 @@
       if (f === 'url') { var a = s.querySelector('#openStore'); if (a && safeLink(it.url)) a.href = safeLink(it.url); }
     };
     paint();
-    bindBoardChips(s, it, change); bindSize(s, it, change); bindFields(s, it, change);
+    var priceSync = null, change0 = change;
+    change = function (f) { change0(f); if (priceSync) priceSync(f); };
+    bindBoardChips(s, it, function () { change0('board'); toast(it.board_id ? 'Moved to ' + boardName(it.board_id) : 'Removed from the board'); });
+    bindSize(s, it, change); bindFields(s, it, change);
+    priceSync = bindPrice(s, it, change0);
+    s.querySelector('#copyBtn').onclick = function () { pickBoard('Copy to…', it.board_id, function (bid) { copyItem(it, bid); }); };
     s.querySelector('#soldSw').onchange = function (e) { it.sold_out = e.target.checked; change(); };
-    var bs = s.querySelector('#budgetSw'); if (bs) bs.onchange = function (e) { it.in_budget = e.target.checked; change(); toast(it.in_budget ? 'Counts in your budget' : 'Not counted in your budget'); };
+    var bs = s.querySelector('#budgetSw'); if (bs) bs.onchange = function (e) { it.in_budget = e.target.checked; change(); toast(it.in_budget ? 'Counted in your budget' : 'Left out of your budget'); };
     bb.onclick = function () { it.bought = !it.bought; api.saveItem(it); closeSheet(); renderHome(); toast(it.bought ? 'Marked as bought. Enjoy it!' : 'Moved back to To buy'); };
     var del = s.querySelector('#delBtn');
     if (del) del.onclick = function () {
@@ -848,6 +957,33 @@
       Object.keys(cache).forEach(function (k) { if (cache[k]) cache[k] = cache[k].filter(function (i) { return i.id !== it.id; }); });
       api.deleteItem(it.id); closeSheet(); renderHome(); toast('Item deleted');
     };
+  }
+  // Pick one of my boards (or a board shared with me where I can add).
+  function pickBoard(title, current, done) {
+    var opts = db.boards.concat((db.shared || []).filter(function (b) { return b.role === 'editor'; }));
+    var s = sheet('<h2>' + esc(title) + '</h2><div class="people" id="pickList">' + opts.map(function (b) {
+      return '<button class="person" type="button" data-pick="' + esc(b.id) + '"' + (b.id === current ? ' disabled' : '') + '><span class="av">' + esc(b.name.charAt(0).toUpperCase()) + '</span><span><b>' + esc(b.name) + '</b><small>' +
+        (b.id === current ? 'It\'s already here' : sharedBoard(b.id) ? 'Shared by @' + esc((b.owner && b.owner.username) || '') : (CLOUD && b.visibility === 'public' ? 'Public' : 'Private')) + '</small></span></button>';
+    }).join('') + '</div><div class="chips wrap" style="margin-top:.8rem"><button class="chip ghost" type="button" data-new-board>+ New board</button></div>');
+    s.querySelectorAll('[data-pick]').forEach(function (b) { b.onclick = function () { closeSheet(); done(b.dataset.pick); }; });
+    var nb = s.querySelector('[data-new-board]');
+    nb.onclick = function () { promptBoard(function (b) { closeSheet(); renderHome(); done(b.id); }, nb); };
+  }
+  async function copyItem(src, bid) {
+    var mine = src.user_id === user.id;
+    var it = {
+      id: uid(), user_id: user.id, board_id: bid, url: src.url, title: src.title, brand: src.brand, image_url: src.image_url,
+      price: src.price, was_price: src.was_price, currency: src.currency, home_price: src.home_currency === user.currency ? src.home_price : null, home_currency: src.home_currency === user.currency ? src.home_currency : null,
+      size: src.size || '', sizes: src.sizes || [], note: mine ? (src.note || '') : '', sold_out: !!src.sold_out, bought: false, in_budget: true, created_at: new Date().toISOString()
+    };
+    if (it.price != null && it.currency && it.currency !== user.currency && it.home_price == null) {
+      it.home_price = await convert(it.price, it.currency, user.currency); it.home_currency = it.home_price == null ? null : user.currency;
+    }
+    if (!(await api.saveItem(it))) return;
+    db.items.push(it);
+    if (cache[bid]) cache[bid].unshift(it);
+    toast('Copied to ' + boardName(bid));
+    if (user && document.querySelector('.home .chips')) renderHome();
   }
   function safeLink(u) { return /^https?:\/\//i.test(u || '') ? u : ''; }
 
@@ -862,7 +998,7 @@
         '<button class="btn block" type="button" id="mOut">Sign out</button>' +
         '<button class="link danger" type="button" id="mDel">Delete my account and stash</button>' +
       '</div><p class="fine">' + (CLOUD ? 'Your stash is synced to your account.' : 'Test version. Everything is saved in this browser only.') + '</p>');
-    s.querySelector('#curSel').onchange = function (e) { user.currency = e.target.value; api.saveProfile(); renderHome(); toast('New items will use ' + user.currency); };
+    s.querySelector('#curSel').onchange = function (e) { user.currency = e.target.value; api.saveProfile(); getRates(user.currency).then(function () { if (!document.querySelector('.overlay')) renderHome(); }); renderHome(); toast('New items will use ' + user.currency); };
     s.querySelector('#mSetup').onclick = openSetup;
     var mp = s.querySelector('#mProfile'); if (mp) mp.onclick = function () { if (user.username) nav({ u: user.username }); else ensureUsername(); };
     var mpe = s.querySelector('#mPeople'); if (mpe) mpe.onclick = openPeople;
@@ -1119,8 +1255,8 @@
       (it.price != null ? '<div class="price">' + esc(money(it.price, it.currency)) + (it.was_price > it.price ? '<s>' + esc(fmt(it.was_price)) + '</s>' : '') + '</div>' : '') +
       (it.note ? '<p class="hint">' + esc(it.note) + '</p>' : '') +
       '<div class="stack">' + (safeLink(it.url) ? '<a class="btn primary block" href="' + esc(safeLink(it.url)) + '" target="_blank" rel="noopener noreferrer">Open store page</a>' : '') +
-      (user && safeLink(it.url) ? '<button class="btn block" type="button" id="copyToMine">Save to my stash</button>' : '') + '</div>');
-    var c = s.querySelector('#copyToMine'); if (c) c.onclick = function () { openSave(it.url); };
+      (user ? '<button class="btn block" type="button" id="copyToMine">Save to my board</button>' : '') + '</div>');
+    var c = s.querySelector('#copyToMine'); if (c) c.onclick = function () { pickBoard('Save to…', null, function (bid) { copyItem(it, bid); }); };
   }
 
   async function loadShared(bid) {
@@ -1200,14 +1336,16 @@
     var tabItems = ui.tab === 'bought' ? bought : toBuy;
     var list = tabItems.slice().sort(function (a, b) { return (b.created_at || '').localeCompare(a.created_at || ''); });
 
-    var sumLabel, sumVal, sumNote = '';
-    if (shB) { sumLabel = ui.tab === 'bought' ? 'Bought' : 'Total'; sumVal = totals(tabItems, ''); sumNote = 'Shared boards don\'t count in your budget.'; }
-    else if (ownB && ownB.in_budget === false) { sumLabel = 'Total'; sumVal = totals(tabItems, user.currency); sumNote = 'This board isn\'t in your budget.'; }
-    else {
-      var counted = tabItems.filter(counts), skipped = tabItems.length - counted.length;
-      sumLabel = ui.tab === 'bought' ? 'Spent' : 'Left to spend'; sumVal = totals(counted, user.currency);
-      if (skipped) sumNote = skipped + ' item' + (skipped === 1 ? '' : 's') + ' not counted in your budget.';
-    }
+    // Summary under the tabs: what's in this tab, in my currency.
+    var notes = [], inTotals;
+    if (shB) { inTotals = tabItems; notes.push('Shared board, not in your own totals.'); }
+    else if (ownB) { inTotals = tabItems.filter(function (i) { return i.in_budget !== false; }); }
+    else { inTotals = tabItems.filter(counts); }
+    var skipped = tabItems.length - inTotals.length, hs = homeSum(inTotals);
+    if (skipped) notes.push(skipped + ' item' + (skipped === 1 ? '' : 's') + ' left out of the total.');
+    if (hs.missing) notes.push(hs.missing + ' item' + (hs.missing === 1 ? ' has' : 's have') + ' no ' + user.currency + ' price yet.');
+    if (ownB && ownB.in_budget === false && ui.board !== 'all') notes.push('This board isn\'t included in your totals under All.');
+    var sumLabel = ui.tab === 'bought' ? 'Spent' : 'To buy total', sumVal = money(hs.sum, user.currency), sumNote = notes.join(' ');
 
     app.innerHTML =
       '<div class="home has-tabs">' +
@@ -1218,7 +1356,7 @@
           (db.shared || []).map(function (b) { return '<button class="chip shared" type="button" title="Shared by @' + esc((b.owner && b.owner.username) || '') + '" data-board="' + esc(b.id) + '" aria-pressed="' + (ui.board === b.id) + '">' + PEOPLE_SVG.replace(/22/g, '14') + ' ' + esc(b.name) + '</button>'; }).join('') +
           '<button class="chip ghost" type="button" id="newBoardBtn">+ Board</button>' +
         '</nav>' +
-        (cur ? boardHeaderHtml(cur, !!ownB, inBoard.length) : '') +
+        (cur ? boardHeaderHtml(cur, !!ownB, inBoard) : '') +
         '<div class="seg" role="tablist">' +
           '<button type="button" role="tab" data-tab="tobuy" aria-selected="' + (ui.tab === 'tobuy') + '">To buy · ' + toBuy.length + '</button>' +
           '<button type="button" role="tab" data-tab="bought" aria-selected="' + (ui.tab === 'bought') + '">Bought · ' + bought.length + '</button>' +
@@ -1244,22 +1382,34 @@
     var sel = app.querySelector('.chip[aria-pressed=true]'); if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
-  function boardHeaderHtml(b, own, n) {
+  function budgetHtml(b, items) {
+    var cur = user.currency;
+    var counted = items.filter(function (i) { return i.in_budget !== false; });
+    var spent = homeSum(counted.filter(function (i) { return i.bought; })).sum, toBuy = homeSum(counted.filter(function (i) { return !i.bought; })).sum;
+    if (b.budget == null || b.budget === '') return '<button class="budget empty" type="button" id="budgetBtn"><span>＋ Set a budget for this board</span><small>See what\'s left as you shop</small></button>';
+    var B = +b.budget, left = B - spent, sp = B ? Math.min(100, spent / B * 100) : 100, tb = B ? Math.max(0, Math.min(100 - sp, toBuy / B * 100)) : 0;
+    var over = toBuy - Math.max(left, 0);
+    return '<button class="budget" type="button" id="budgetBtn" aria-label="Edit budget">' +
+      '<span class="brow"><span><b' + (left < 0 ? ' class="over"' : '') + '>' + esc(money(left, cur)) + '</b> left</span><small>of ' + esc(money(B, cur)) + ' budget</small></span>' +
+      '<span class="bar" aria-hidden="true"><i style="width:' + sp.toFixed(1) + '%"></i><i class="tb" style="width:' + tb.toFixed(1) + '%"></i></span>' +
+      '<small class="blegend"><span class="dot sp"></span>Spent ' + esc(money(spent, cur)) + ' <span class="dot tb"></span>To buy ' + esc(money(toBuy, cur)) +
+      (over > 0 ? ' · <span class="over">' + esc(money(over, cur)) + ' over</span>' : '') + '</small></button>';
+  }
+  function boardHeaderHtml(b, own, items) {
+    var n = items.length;
     var secret = CLOUD && b.visibility !== 'public';
     return '<section class="bhead2">' +
-      '<div class="bt"><h2>' + esc(b.name) + '</h2>' + (secret ? '<span class="lockb" title="Secret board">' + LOCK.replace(/12/g, '16') + '</span>' : '') + '</div>' +
-      '<p class="muted small">' + n + ' item' + (n === 1 ? '' : 's') + (own ? (secret ? ' · Secret' : CLOUD ? ' · Public' : '') : ' · Shared by @' + esc((b.owner && b.owner.username) || '') + ' · ' + (b.role === 'editor' ? 'you can add' : 'view only')) + '</p>' +
+      '<div class="bt"><h2>' + esc(b.name) + '</h2>' + (secret ? '<span class="lockb" title="Private board">' + LOCK.replace(/12/g, '16') + '</span>' : '') + '</div>' +
+      '<p class="muted small">' + n + ' item' + (n === 1 ? '' : 's') + (own ? (secret ? ' · Private' : CLOUD ? ' · Public' : '') : ' · Shared by @' + esc((b.owner && b.owner.username) || '') + ' · ' + (b.role === 'editor' ? 'you can add' : 'view only')) + '</p>' +
       '<div class="bact">' +
         (CLOUD ? '<button class="collab" type="button" id="collabBtn" aria-label="' + (own ? 'Invite collaborators' : 'See who\'s on this board') + '">' + stackHtml(b) + (own ? '<span class="av add">+</span>' : '') + '</button>' : '') +
-        (own ? '<button class="pill" type="button" id="budgetPill" aria-pressed="' + (b.in_budget !== false) + '">' + (b.in_budget !== false ? '✓ In my budget' : 'Not in my budget') + '</button>' : '') +
         '<span class="grow"></span>' +
         (CLOUD ? '<button class="icon soft" type="button" id="shareB" aria-label="Share board">' + SHARE_SVG + '</button>' : '') +
         '<button class="icon soft" type="button" id="moreB" aria-label="' + (own ? 'Edit board' : 'Board info') + '">' + MORE_SVG + '</button>' +
-      '</div></section>';
+      '</div>' + (own ? budgetHtml(b, items) : '') + '</section>';
   }
   function bindBoardHeader(b, own) {
-    var bp = document.getElementById('budgetPill');
-    if (bp) bp.onclick = function () { b.in_budget = b.in_budget === false; api.saveBoard(b); renderHome(); toast(b.in_budget ? 'Counts in your budget' : 'Not counted in your budget'); };
+    var bb = document.getElementById('budgetBtn'); if (bb) bb.onclick = function () { openBoardEditor(b, null, 'budget'); };
     var cb = document.getElementById('collabBtn'); if (cb) cb.onclick = function () { own ? openInvite(b) : openBoardInfo(b); };
     var sh = document.getElementById('shareB'); if (sh) sh.onclick = function () { openShare(b); };
     document.getElementById('moreB').onclick = function () { own ? openBoardEditor(b) : openBoardInfo(b); };
@@ -1276,22 +1426,25 @@
     var sub = [it.brand ? '<span class="brand">' + esc(it.brand) + '</span>' : '', it.price != null ? esc(money(it.price, it.currency)) : ''].filter(Boolean).join(' · ');
     return '<button class="card" type="button" data-id="' + esc(it.id) + '">' +
       '<div class="ph' + (img ? '' : ' none') + '">' + (img ? '<img src="' + esc(img) + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : letter(it)) + tagsHtml(it) + '</div>' +
-      '<div class="meta"><b>' + esc(it.title || 'Untitled item') + '</b>' + (sub ? '<small>' + sub + '</small>' : '') +
+      '<div class="meta"><b>' + esc(it.title || 'Untitled item') + '</b>' + (sub ? '<small>' + sub + '</small>' : '') + convLine(it) +
       (it.in_budget === false ? '<small class="nb">Not in budget</small>' : '') + '</div></button>';
   }
 
   /* ---------- create / edit board ---------- */
-  function openBoardEditor(b, done) {
+  function openBoardEditor(b, done, focus) {
     var isNew = !b;
-    var d = b || { name: '', visibility: 'private', in_budget: true };
+    var d = b || { name: '', visibility: 'private', in_budget: true, budget: null };
     var s = sheet('<h2>' + (isNew ? 'Create board' : 'Edit board') + '</h2><form id="beForm" novalidate>' +
       '<label class="field"><span>Name</span><input type="text" name="name" maxlength="40" placeholder="Like “Eid outfits” or “Home”" value="' + esc(d.name) + '" autocapitalize="sentences" required><small class="ferr" id="beErr"></small></label>' +
-      (CLOUD ? switchHtml('secretSw', 'Keep this board secret', 'Only you and people you invite can see it.', d.visibility !== 'public') : '') +
-      switchHtml('budgetSw', 'Count in my budget', 'Items here add to your Left to spend.', d.in_budget !== false) +
+      (CLOUD ? switchHtml('secretSw', 'Private', 'On: only you and people you invite can see it. Off: public on your profile.', d.visibility !== 'public') : '') +
+      '<label class="field" style="margin-top:1rem"><span>Budget (optional)</span><span class="cur"><input type="text" inputmode="decimal" name="budget" placeholder="e.g. 10,000" value="' + (d.budget == null ? '' : esc(d.budget)) + '"><em>' + esc(user.currency) + '</em></span>' +
+        '<small class="help">We\'ll show what\'s left as you mark things bought.</small></label>' +
+      switchHtml('budgetSw', 'Include in my totals', 'Count this board in To buy and Spent under All.', d.in_budget !== false) +
       (!isNew && CLOUD ? '<h3>Collaborators</h3><button class="person" type="button" id="manageCollab">' + stackHtml(b) + '<span><b>Invite or manage people</b><small>Choose who can view or add</small></span><em>›</em></button>' : '') +
       '<div class="stack"><button class="btn primary block" type="submit">' + (isNew ? 'Create' : 'Done') + '</button>' +
       (isNew ? '' : '<button class="link danger" type="button" id="bDel">Delete board</button>') + '</div></form>');
     if (isNew) setTimeout(function () { s.querySelector('[name=name]').focus(); }, 80);
+    if (focus === 'budget') setTimeout(function () { s.querySelector('[name=budget]').focus(); }, 80);
     var mc = s.querySelector('#manageCollab'); if (mc) mc.onclick = function () { openInvite(b); };
     s.querySelector('#beForm').onsubmit = function (e) {
       e.preventDefault();
@@ -1303,6 +1456,7 @@
       } else b.name = name.slice(0, 40);
       b.visibility = secret && !secret.checked ? 'public' : 'private';
       b.in_budget = inBudget;
+      var bv = s.querySelector('[name=budget]').value.trim(); b.budget = bv ? num(bv) : null;
       api.saveBoard(b); closeSheet();
       if (done) return done(b);
       if (isNew) { ui.board = b.id; ui.tab = 'tobuy'; toast('Board "' + b.name + '" created'); }
@@ -1511,7 +1665,7 @@
             : '<button class="btn primary follow" type="button" id="joinBtn">Sign up to follow</button>') +
         '</section>' +
         '<h2 class="sec">' + (me ? 'Your boards' : 'Boards') + '</h2>' +
-        (mine.length ? '<section class="boards">' + mine.map(function (b) { return boardCard(b, covers[b.id], me && b.visibility !== 'public' ? LOCK + ' Secret' : ''); }).join('') + '</section>'
+        (mine.length ? '<section class="boards">' + mine.map(function (b) { return boardCard(b, covers[b.id], me && b.visibility !== 'public' ? LOCK + ' Private' : ''); }).join('') + '</section>'
           : '<p class="muted">' + (me ? 'No boards yet.' : 'No public boards yet.') + '</p>') +
         (me ? '<p class="muted small" style="margin-top:.6rem">Other people only see your public boards, plus secret ones you invited them to.</p>' : '') +
         (shared.length ? '<h2 class="sec">Shared with you</h2><section class="boards">' + shared.map(function (b) { return boardCard(b, covers[b.id], PEOPLE_SVG.replace(/22/g, '12') + ' Shared'); }).join('') + '</section>' : '') +
