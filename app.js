@@ -1387,13 +1387,14 @@
     var counted = items.filter(function (i) { return i.in_budget !== false; });
     var spent = homeSum(counted.filter(function (i) { return i.bought; })).sum, toBuy = homeSum(counted.filter(function (i) { return !i.bought; })).sum;
     if (b.budget == null || b.budget === '') return '<button class="budget empty" type="button" id="budgetBtn"><span>＋ Set a budget for this board</span><small>See what\'s left as you shop</small></button>';
-    var B = +b.budget, left = B - spent, sp = B ? Math.min(100, spent / B * 100) : 100, tb = B ? Math.max(0, Math.min(100 - sp, toBuy / B * 100)) : 0;
-    var over = toBuy - Math.max(left, 0);
+    // Left = budget − spent (bought) − to buy (still planned)
+    var B = +b.budget, left = B - spent - toBuy;
+    var sp = B ? Math.min(100, spent / B * 100) : 100, tb = B ? Math.max(0, Math.min(100 - sp, toBuy / B * 100)) : 0;
     return '<button class="budget" type="button" id="budgetBtn" aria-label="Edit budget">' +
-      '<span class="brow"><span><b' + (left < 0 ? ' class="over"' : '') + '>' + esc(money(left, cur)) + '</b> left</span><small>of ' + esc(money(B, cur)) + ' budget</small></span>' +
-      '<span class="bar" aria-hidden="true"><i style="width:' + sp.toFixed(1) + '%"></i><i class="tb" style="width:' + tb.toFixed(1) + '%"></i></span>' +
-      '<small class="blegend"><span class="dot sp"></span>Spent ' + esc(money(spent, cur)) + ' <span class="dot tb"></span>To buy ' + esc(money(toBuy, cur)) +
-      (over > 0 ? ' · <span class="over">' + esc(money(over, cur)) + ' over</span>' : '') + '</small></button>';
+      '<span class="brow"><span>' + (left < 0 ? '<b class="over">' + esc(money(-left, cur)) + '</b> over' : '<b>' + esc(money(left, cur)) + '</b> left') + '</span><small>of ' + esc(money(B, cur)) + ' budget</small></span>' +
+      '<span class="bar' + (left < 0 ? ' is-over' : '') + '" aria-hidden="true"><i style="width:' + sp.toFixed(1) + '%"></i><i class="tb" style="width:' + tb.toFixed(1) + '%"></i></span>' +
+      '<small class="blegend"><span class="dot sp"></span>Spent ' + esc(money(spent, cur)) + ' <span class="dot tb"></span>To buy ' + esc(money(toBuy, cur)) + '</small>' +
+      '<small class="bhint">' + (left < 0 ? 'Your To buy list goes over this budget.' : 'Left after everything on your To buy list.') + '</small></button>';
   }
   function boardHeaderHtml(b, own, items) {
     var n = items.length;

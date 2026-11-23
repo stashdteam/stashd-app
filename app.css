@@ -316,3 +316,5 @@ body.locked #toast.show{transform:translate(-50%,0)}
 .over{color:#b4442c;font-weight:700}
 @media (prefers-color-scheme:dark){.over{color:#f0937c}}
 .person[disabled]{opacity:.5}
+.bar.is-over i.tb{background:#c0623f}
+.bhint{display:block;color:var(--muted);font-size:.75rem;margin-top:.2rem}
