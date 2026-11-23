@@ -318,3 +318,25 @@ body.locked #toast.show{transform:translate(-50%,0)}
 .person[disabled]{opacity:.5}
 .bar.is-over i.tb{background:#c0623f}
 .bhint{display:block;color:var(--muted);font-size:.75rem;margin-top:.2rem}
+/* budget bar: solid = actually spent, striped = planned (to buy) */
+.bar i.tb{background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--accent) 30%,transparent) 0 5px,transparent 5px 10px)!important;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 35%,transparent)}
+.bar.is-over i.tb{background:repeating-linear-gradient(135deg,rgba(192,98,63,.45) 0 5px,transparent 5px 10px)!important}
+.dot.tb{background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--accent) 45%,transparent) 0 2px,transparent 2px 4px)!important;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 45%,transparent)}
+
+/* price checks + notifications */
+.t.drop{background:var(--off-bg);color:var(--off-ink)}
+.refresh{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin:.1rem 0 .4rem}
+.hist{margin:.2rem 0 .4rem}
+.hist summary{font-weight:600;font-size:.875rem;color:var(--accent);cursor:pointer;padding:.3rem 0}
+.hist div{display:flex;gap:.6rem;align-items:baseline;font-size:.875rem;padding:.25rem 0;border-bottom:1px solid var(--line)}
+.hist span{color:var(--muted);min-width:4rem}
+.hist em{font-style:normal;color:var(--muted);font-size:.75rem}
+.top .bell{position:relative}
+.badge{position:absolute;top:-.2rem;right:-.2rem;min-width:1.2rem;height:1.2rem;padding:0 .3rem;border-radius:999px;background:#b4442c;color:#fff;font-size:.6875rem;font-weight:800;display:grid;place-items:center;border:2px solid var(--bg)}
+.notes{display:grid;gap:.4rem}
+.note{display:flex;gap:.75rem;align-items:flex-start;text-align:left;width:100%;padding:.75rem;border-radius:.9rem;border:1px solid var(--line);background:var(--card)}
+.note.unread{border-color:var(--accent)}
+.note small{display:block;color:var(--muted);margin-top:.15rem}
+.note small s{margin-left:.2rem}
+.nic{width:2rem;height:2rem;border-radius:50%;display:grid;place-items:center;font-weight:800;flex:none;background:var(--sold-bg);color:var(--sold-ink)}
+.k-price_drop .nic,.k-back_in_stock .nic{background:var(--off-bg);color:var(--off-ink)}

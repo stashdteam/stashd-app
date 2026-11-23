@@ -478,6 +478,36 @@
     finally { if (document.body.contains(btn)) { btn.disabled = false; btn.textContent = label; } }
   }
 
+  var noteList = [];
+  async function loadNotes() {
+    if (!CLOUD || !sb) return;
+    var r = await sb.from('notifications').select('*').order('created_at', { ascending: false }).limit(50);
+    noteList = r.error ? [] : r.data;
+    var b = document.getElementById('bellBtn'); if (b) b.outerHTML = bellHtml(); bindBell();
+  }
+  function bellHtml() {
+    var n = noteList.filter(function (x) { return !x.read_at; }).length;
+    return '<button class="icon soft bell" type="button" id="bellBtn" aria-label="Notifications' + (n ? ', ' + n + ' new' : '') + '">' + BELL_SVG + (n ? '<span class="badge">' + (n > 9 ? '9+' : n) + '</span>' : '') + '</button>';
+  }
+  function bindBell() { var b = document.getElementById('bellBtn'); if (b) b.onclick = openNotes; }
+  async function openNotes() {
+    var KIND = { price_drop: ['↓', 'Price dropped'], price_up: ['↑', 'Price went up'], back_in_stock: ['✓', 'Back in stock'], sold_out: ['×', 'Sold out'] };
+    var s = sheet('<h2>Notifications</h2>' + (noteList.length ? '<div class="noteList">' + noteList.map(function (n) {
+      var k = KIND[n.kind] || ['•', n.kind];
+      return '<button class="note' + (n.read_at ? '' : ' unread') + ' k-' + esc(n.kind) + '" type="button" data-note="' + esc(n.item_id || '') + '"><span class="nic">' + k[0] + '</span><span><b>' + k[1] + '</b> · ' + esc(n.title || 'An item') +
+        '<small>' + (n.kind === 'price_drop' || n.kind === 'price_up' ? esc(money(n.new_price, n.currency)) + ' <s>' + esc(fmt(n.old_price)) + '</s> · ' : '') + esc(ago(n.created_at)) + '</small></span></button>';
+    }).join('') + '</div><div class="stack"><button class="link" type="button" id="clearNotes">Clear all</button></div>'
+      : '<div class="empty" style="padding:1.5rem 0"><p>No notifications yet. We check your items about once a day and tell you here when a price drops or something is back in stock.</p></div>'));
+    s.querySelectorAll('[data-note]').forEach(function (b) { b.onclick = function () { var id = b.dataset.note; closeSheet(); if (id && db.items.some(function (i) { return i.id === id; })) openItem(id); }; });
+    var cl = s.querySelector('#clearNotes');
+    if (cl) cl.onclick = async function () { await sb.from('notifications').delete().eq('user_id', user.id); noteList = []; closeSheet(); renderHome(); };
+    if (noteList.some(function (n) { return !n.read_at; })) {
+      var now = new Date().toISOString();
+      await sb.from('notifications').update({ read_at: now }).eq('user_id', user.id).is('read_at', null);
+      noteList.forEach(function (n) { n.read_at = n.read_at || now; });
+      var b = document.getElementById('bellBtn'); if (b) { b.outerHTML = bellHtml(); bindBell(); }
+    }
+  }
   async function startCloud(au, msg) {
     var md = au.user_metadata || {};
     user = { id: au.id, email: au.email, name: md.name || md.full_name || md.given_name || (au.email || '').split('@')[0], currency: md.currency || 'EGP' };
@@ -510,6 +540,7 @@
       var ins = await sb.from('boards').insert(seed).select(BCOLS);
       db.boards = ins.error ? [] : ins.data;
     }
+    loadNotes();
     afterSignIn(msg);
     ensureUsername();
   }
@@ -582,8 +613,33 @@
   function newBoard(name, n) { return { id: uid(), user_id: user.id, name: name, visibility: 'private', link_token: null, in_budget: true, created_at: new Date(Date.now() + (n || 0)).toISOString() }; }
 
   /* ---------- home ---------- */
+  function droppedRecently(it) {
+    return it.prev_price != null && it.price != null && +it.price < +it.prev_price && !it.bought &&
+      it.price_changed_at && Date.now() - new Date(it.price_changed_at).getTime() < 14 * 864e5;
+  }
+  function ago(iso) {
+    if (!iso) return '';
+    var m = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+    return m < 2 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' days ago';
+  }
+  // Re-check one item's price and stock on the store (cloud only). Resolves to { status, item, changes } or null.
+  async function refreshItem(it) {
+    if (!CLOUD || !sb || !it.url) return null;
+    try {
+      var r = await Promise.race([sb.functions.invoke('read-link', { body: { action: 'refresh', item_id: it.id } }), new Promise(function (res) { setTimeout(function () { res(null); }, 15000); })]);
+      if (!r || r.error || !r.data || !r.data.ok) return null;
+      ['price', 'was_price', 'currency', 'sold_out', 'home_price', 'home_currency', 'prev_price', 'price_changed_at', 'last_checked_at', 'check_status'].forEach(function (k) { if (k in r.data.item) it[k] = r.data.item[k]; });
+      return r.data;
+    } catch (e) { return null; }
+  }
+  function changeText(c, cur) {
+    return c.kind === 'price_drop' ? 'Price dropped to ' + money(c.new_price, cur) + ' (was ' + fmt(c.old_price) + ')'
+      : c.kind === 'price_up' ? 'Price went up to ' + money(c.new_price, cur) + ' (was ' + fmt(c.old_price) + ')'
+      : c.kind === 'back_in_stock' ? 'Back in stock!' : 'Now sold out';
+  }
   function tagsHtml(it, inline) {
-    var p = pct(it), s = (it.sold_out ? '<span class="t sold">Sold out</span>' : '') + (p ? '<span class="t off">−' + p + '%</span>' : '');
+    var p = pct(it), s = (it.sold_out ? '<span class="t sold">Sold out</span>' : '') + (p ? '<span class="t off">−' + p + '%</span>' : '') +
+      (droppedRecently(it) ? '<span class="t drop">↓ Price dropped</span>' : '');
     return s ? '<div class="tags' + (inline ? ' inline' : '') + '">' + s + '</div>' : '';
   }
   function letter(it) { return '<span class="letter" aria-hidden="true">' + esc((it.brand || it.title || '?').charAt(0).toUpperCase()) + '</span>'; }
@@ -919,6 +975,7 @@
         '<button class="btn" type="button" id="boughtBtn"></button>' +
       '</div>' +
       '<h3>Price</h3>' + priceHtml(it) +
+      (CLOUD && safeLink(it.url) ? '<div class="refresh"><button class="btn small" type="button" id="refreshBtn">↻ Refresh price</button><small class="muted" id="checkedAt"></small></div><div id="history"></div>' : '') +
       (mine ? '<h3>Board <span class="muted small">· tap one to move it</span></h3>' + boardChips(it) : '') +
       '<div class="stack" style="margin-top:.6rem"><button class="btn block" type="button" id="copyBtn">Copy to another board</button></div>' +
       sizeHtml(it) +
@@ -949,7 +1006,40 @@
     s.querySelector('#copyBtn').onclick = function () { pickBoard('Copy to…', it.board_id, function (bid) { copyItem(it, bid); }); };
     s.querySelector('#soldSw').onchange = function (e) { it.sold_out = e.target.checked; change(); };
     var bs = s.querySelector('#budgetSw'); if (bs) bs.onchange = function (e) { it.in_budget = e.target.checked; change(); toast(it.in_budget ? 'Counted in your budget' : 'Left out of your budget'); };
-    bb.onclick = function () { it.bought = !it.bought; api.saveItem(it); closeSheet(); renderHome(); toast(it.bought ? 'Marked as bought. Enjoy it!' : 'Moved back to To buy'); };
+    var STATUS = { blocked: 'This store blocks automatic checks, so the price stays as saved. Type the new price if it changed.', no_product: 'Couldn\'t find the price on the page right now.', unreachable: 'Couldn\'t open the store page right now.' };
+    function paintChecked() {
+      var el = s.querySelector('#checkedAt'); if (!el) return;
+      el.textContent = it.last_checked_at ? 'Checked ' + ago(it.last_checked_at) + (it.check_status === 'blocked' ? ' · store blocks checks' : '') : 'Checked automatically about once a day';
+    }
+    async function loadHistory() {
+      var el = s.querySelector('#history'); if (!el || !sb) return;
+      var h = await sb.from('price_history').select('price,currency,sold_out,checked_at').eq('item_id', it.id).order('checked_at', { ascending: false }).limit(30);
+      var rows = (h.data || []).filter(function (r, i, a) { return i === a.length - 1 || +r.price !== +a[i + 1].price || r.sold_out !== a[i + 1].sold_out; }).slice(0, 5);
+      el.innerHTML = rows.length > 1 ? '<details class="hist"><summary>Price history</summary>' + rows.map(function (r) {
+        return '<div><span>' + esc(new Date(r.checked_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })) + '</span><b>' + esc(money(r.price, r.currency || it.currency)) + '</b>' + (r.sold_out ? '<em>sold out</em>' : '') + '</div>';
+      }).join('') + '</details>' : '';
+    }
+    paintChecked(); loadHistory();
+    var rb = s.querySelector('#refreshBtn');
+    if (rb) rb.onclick = async function () {
+      rb.disabled = true; rb.textContent = 'Checking…';
+      var r = await refreshItem(it);
+      rb.disabled = false; rb.textContent = '↻ Refresh price';
+      if (!r) return toast('Couldn\'t check right now. Try again later.');
+      paint(); paintChecked(); loadHistory(); renderHome();
+      var pi = s.querySelector('[data-f=price]'); if (pi) pi.value = it.price == null ? '' : it.price;
+      var hi = s.querySelector('[data-home]'); if (hi) hi.value = it.home_price == null ? '' : it.home_price;
+      toast(r.changes.length ? r.changes.map(function (c) { return changeText(c, it.currency); }).join(' · ') : STATUS[r.status] || 'No change. Price is still ' + money(it.price, it.currency) + '.');
+    };
+    bb.onclick = async function () {
+      if (!it.bought && CLOUD && safeLink(it.url)) {             // get the latest price before it counts as spent
+        bb.disabled = true; bb.textContent = 'Checking the latest price…';
+        var r = await refreshItem(it);
+        if (r && r.changes.some(function (c) { return c.kind === 'price_drop' || c.kind === 'price_up'; })) toast('Price updated to ' + money(it.price, it.currency));
+      }
+      it.bought = !it.bought; api.saveItem(it); closeSheet(); renderHome();
+      setTimeout(function () { toast(it.bought ? 'Marked as bought at ' + money(it.price, it.currency) + '. Enjoy it!' : 'Moved back to To buy'); }, 900);
+    };
     var del = s.querySelector('#delBtn');
     if (del) del.onclick = function () {
       if (!confirm('Delete "' + (it.title || 'this item') + '"?')) return;
@@ -1268,6 +1358,7 @@
 
   /* ---------- icons + small UI helpers ---------- */
   function svg(d, sw) { return '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="' + (sw || 2) + '" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + d + '</svg>'; }
+  var BELL_SVG = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>';
   var HOME_SVG = svg('<path d="M4 11.5 12 5l8 6.5"/><path d="M6 10v9h12v-9"/>');
   var SEARCH_SVG = svg('<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>');
   var SHARE_SVG = svg('<path d="M12 15V4"/><path d="m7.5 8.5 4.5-4.5 4.5 4.5"/><path d="M5 13v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"/>');
@@ -1349,7 +1440,7 @@
 
     app.innerHTML =
       '<div class="home has-tabs">' +
-        '<header class="top"><h1 class="wm">Stash<span>d</span></h1></header>' +
+        '<header class="top"><h1 class="wm">Stash<span>d</span></h1>' + (CLOUD ? bellHtml() : '') + '</header>' +
         '<nav class="chips" aria-label="Boards">' +
           '<button class="chip" type="button" data-board="all" aria-pressed="' + (ui.board === 'all') + '">All</button>' +
           db.boards.map(function (b) { return '<button class="chip" type="button" data-board="' + esc(b.id) + '" aria-pressed="' + (ui.board === b.id) + '">' + (CLOUD && b.visibility !== 'public' ? LOCK + ' ' : '') + esc(b.name) + '</button>'; }).join('') +
@@ -1369,7 +1460,7 @@
           : emptyHtml()) +
       '</div>' + tabbarHtml('home');
 
-    bindTabbar();
+    bindTabbar(); bindBell();
     document.getElementById('newBoardBtn').onclick = function () { openBoardEditor(null); };
     app.querySelectorAll('[data-board]').forEach(function (b) { b.onclick = function () { ui.board = b.dataset.board; renderHome(); }; });
     app.querySelectorAll('[data-tab]').forEach(function (b) { b.onclick = function () { ui.tab = b.dataset.tab; renderHome(); }; });
@@ -1393,7 +1484,7 @@
     return '<button class="budget" type="button" id="budgetBtn" aria-label="Edit budget">' +
       '<span class="brow"><span>' + (left < 0 ? '<b class="over">' + esc(money(-left, cur)) + '</b> over' : '<b>' + esc(money(left, cur)) + '</b> left') + '</span><small>of ' + esc(money(B, cur)) + ' budget</small></span>' +
       '<span class="bar' + (left < 0 ? ' is-over' : '') + '" aria-hidden="true"><i style="width:' + sp.toFixed(1) + '%"></i><i class="tb" style="width:' + tb.toFixed(1) + '%"></i></span>' +
-      '<small class="blegend"><span class="dot sp"></span>Spent ' + esc(money(spent, cur)) + ' <span class="dot tb"></span>To buy ' + esc(money(toBuy, cur)) + '</small>' +
+      '<small class="blegend"><span class="dot sp"></span>Spent ' + esc(money(spent, cur)) + ' <span class="dot tb"></span>Planned (to buy) ' + esc(money(toBuy, cur)) + '</small>' +
       '<small class="bhint">' + (left < 0 ? 'Your To buy list goes over this budget.' : 'Left after everything on your To buy list.') + '</small></button>';
   }
   function boardHeaderHtml(b, own, items) {

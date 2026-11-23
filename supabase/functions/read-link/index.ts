@@ -1,12 +1,15 @@
-// Stashd link reader (Supabase Edge Function "read-link").
-// The app sends { url } and gets back the product's title, store, photo, price, old price,
-// currency, sold-out status and sizes. Runs on Supabase's servers, so it isn't blocked by the
-// browser rules that stop a web page from reading other websites.
-// Some big brands block automated reading even from servers; then the app asks the user to fill in details.
+// Stashd link reader + price checker (Supabase Edge Function "read-link"). Deploy with "Verify JWT" OFF:
+// this file checks who is calling itself.
+//   { url }                         signed-in user: read a product link (title, store, photo, price, old price, currency, stock, sizes)
+//   { action: "refresh", item_id }  signed-in user: re-check one saved item's price and stock now
+//   { action: "cron" }              the hourly scheduled job (header x-cron-secret): re-check items not checked for ~20 hours
+// Runs on Supabase's servers, so it isn't blocked by the browser rules that stop a web page from reading other websites.
+// Some big brands block automated reading even from servers; their saved price is then left as it is.
+import { createClient } from "npm:@supabase/supabase-js@2.118.0";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
@@ -188,7 +191,7 @@ export function parseHtml(html: string, base: URL): Product {
   return out;
 }
 
-async function readLink(u: URL): Promise<Product> {
+export async function readLink(u: URL): Promise<Product> {
   const s = await shopify(u).catch(() => null);
   if (s) return s;
   const r = await get(u, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8");
@@ -201,14 +204,119 @@ async function readLink(u: URL): Promise<Product> {
   return p;
 }
 
+/* ---------------- price checks ---------------- */
+type Item = Record<string, any>;
+type Note = { kind: "price_drop" | "price_up" | "back_in_stock" | "sold_out"; old_price: number | null; new_price: number | null };
+
+// What changes for a saved item after re-reading its page. Pure, so it's easy to test.
+export function planUpdate(item: Item, res: Product, now: string) {
+  const upd: Record<string, unknown> = { last_checked_at: now, check_status: res.ok ? "ok" : (res.error || "failed") };
+  const notes: Note[] = [];
+  if (!res.ok) return { upd, notes, hist: null as Record<string, unknown> | null };   // blocked / unreadable: keep the saved price
+  const itemCur = String(item.currency || "").toUpperCase(), resCur = String(res.currency || "").toUpperCase();
+  const sameCurrency = !itemCur || !resCur || itemCur === resCur;                     // never mix currencies (e.g. a store showing GBP to our server)
+  const old = item.price == null ? null : Number(item.price);
+  if (res.price != null && sameCurrency && (old == null || Math.abs(old - res.price) >= 0.01)) {
+    upd.price = res.price; upd.prev_price = old; upd.price_changed_at = now;
+    upd.was_price = res.was_price ?? null;
+    if (!itemCur && resCur) upd.currency = resCur;
+    if (old != null) notes.push({ kind: res.price < old ? "price_drop" : "price_up", old_price: old, new_price: res.price });
+  }
+  if (typeof res.sold_out === "boolean" && res.sold_out !== !!item.sold_out) {
+    upd.sold_out = res.sold_out;
+    notes.push({ kind: res.sold_out ? "sold_out" : "back_in_stock", old_price: null, new_price: (upd.price as number) ?? old });
+  }
+  const hist = { item_id: item.id, price: (upd.price as number) ?? old, currency: (upd.currency as string) || itemCur || null, sold_out: (upd.sold_out as boolean) ?? !!item.sold_out, checked_at: now };
+  return { upd, notes, hist };
+}
+
+const SB_URL = Deno.env.get("SUPABASE_URL") ?? "";
+const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
+// deno-lint-ignore no-explicit-any
+let _admin: any = null;
+// deno-lint-ignore no-explicit-any
+function admin(): any { return _admin ??= createClient(SB_URL, SERVICE_KEY, { auth: { persistSession: false } }); }
+function bearer(req: Request) { return (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim(); }
+async function signedInUser(req: Request) {
+  const token = bearer(req);
+  if (!token) return null;
+  const { data, error } = await admin().auth.getUser(token);
+  return error || !data?.user ? null : { user: data.user, token };
+}
+
+const rateCache = new Map<string, Record<string, number>>();
+async function toHome(amount: number, from: string, home: string): Promise<number | null> {
+  if (!from || !home || from === home) return amount;
+  if (!rateCache.has(home)) {
+    const r = await get(new URL("https://open.er-api.com/v6/latest/" + encodeURIComponent(home)), "application/json", 6000);
+    try { const j = r && r.status === 200 ? JSON.parse(r.text) : null; if (j?.rates) rateCache.set(home, j.rates); } catch { /* ignore */ }
+  }
+  const rate = rateCache.get(home)?.[from];
+  return rate ? Math.round(amount / rate * 100) / 100 : null;
+}
+
+// Re-read one item and save what changed. Notifications only for scheduled checks (the user sees manual ones right away).
+async function checkItem(item: Item, notify: boolean) {
+  const u = safeUrl(item.url || "");
+  const res: Product = u ? await readLink(u).catch(() => ({ ok: false, error: "failed" })) : { ok: false, error: "bad_url" };
+  const now = new Date().toISOString();
+  const { upd, notes, hist } = planUpdate(item, res, now);
+  if (upd.price != null && item.home_currency) {
+    const cur = String(upd.currency || item.currency || "");
+    const hp = await toHome(upd.price as number, cur, item.home_currency);
+    if (hp != null) upd.home_price = hp;
+  }
+  const { data: saved } = await admin().from("items").update(upd).eq("id", item.id).select("*").maybeSingle();
+  if (hist) await admin().from("price_history").insert(hist);
+  if (notify && notes.length && !item.bought) {
+    await admin().from("notifications").insert(notes.map((n) => ({
+      user_id: item.user_id, item_id: item.id, kind: n.kind, old_price: n.old_price, new_price: n.new_price,
+      currency: (upd.currency as string) || item.currency || null, title: String(item.title || "").slice(0, 140),
+    })));
+  }
+  return { status: res.ok ? "ok" : (res.error || "failed"), item: saved || { ...item, ...upd }, changes: notes };
+}
+
+async function runCron(req: Request) {
+  const given = req.headers.get("x-cron-secret") || "";
+  const { data: sec } = await admin().from("app_secrets").select("value").eq("name", "cron").maybeSingle();
+  if (!given || !sec?.value || given !== sec.value) return json({ ok: false, error: "auth" }, 401);
+  const cutoff = new Date(Date.now() - 20 * 3600 * 1000).toISOString();
+  const { data: items, error } = await admin().from("items").select("*").eq("bought", false).not("url", "is", null)
+    .or(`last_checked_at.is.null,last_checked_at.lt.${cutoff}`).order("last_checked_at", { ascending: true, nullsFirst: true }).limit(40);
+  if (error) return json({ ok: false, error: error.message }, 500);
+  let changed = 0;
+  const queue = [...(items || [])];
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    while (queue.length) { const it = queue.shift()!; const r = await checkItem(it, true).catch(() => null); if (r?.changes.length) changed++; }
+  }));
+  return json({ ok: true, checked: items?.length || 0, changed });
+}
+
 export async function handler(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   if (req.method !== "POST") return json({ ok: false, error: "method" }, 405);
-  let body: { url?: string } = {};
+  let body: { url?: string; action?: string; item_id?: string } = {};
   try { body = await req.json(); } catch { /* empty */ }
-  const u = safeUrl(body.url || "");
-  if (!u) return json({ ok: false, error: "bad_url" }, 400);
-  try { return json(await readLink(u)); } catch { return json({ ok: false, error: "failed" }); }
+  try {
+    if (body.action === "cron") return await runCron(req);
+    const who = await signedInUser(req);
+    if (!who) return json({ ok: false, error: "auth" }, 401);
+    if (body.action === "refresh") {
+      // Read the item as the user, so they can only refresh items they're allowed to see and edit.
+      // deno-lint-ignore no-explicit-any
+      const db: any = createClient(SB_URL, ANON_KEY || SERVICE_KEY, { global: { headers: { Authorization: `Bearer ${who.token}` } }, auth: { persistSession: false } });
+      const { data: item } = await db.from("items").select("*").eq("id", body.item_id || "").maybeSingle();
+      if (!item) return json({ ok: false, error: "not_found" }, 404);
+      const role = item.user_id === who.user.id ? "owner" : (await db.rpc("board_role", { bid: item.board_id })).data;
+      if (!["owner", "editor"].includes(role)) return json({ ok: false, error: "auth" }, 403);
+      return json({ ok: true, ...(await checkItem(item, false)) });
+    }
+    const u = safeUrl(body.url || "");
+    if (!u) return json({ ok: false, error: "bad_url" }, 400);
+    return json(await readLink(u));
+  } catch { return json({ ok: false, error: "failed" }); }
 }
 
 Deno.serve(handler);
