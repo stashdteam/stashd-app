@@ -88,5 +88,6 @@ A plain HTML/CSS/JS web version of the MVP, published with GitHub Pages, for tes
 - Routes: `?u=<username>` profile, `?b=<board>[&k=<link key>]` board link, `?url=` incoming share. Lists shared with you appear as dashed chips and don't count in your own All / left to spend.
 - Google / Apple sign-in buttons are built in and switched on with `providers` in `config.js` once each provider is configured in Supabase.
 - Newsletter opt-in on sign-up posts to the Brevo form (address is in `app.js`).
+- `index.html` loads `app.css`, `config.js` and `app.js` with `?v=<version>`: bump it on every change so phones don't run a cached copy.
 - `privacy.html`: draft; contact email and date still to fill in.
 - `_config.yml` stops GitHub Pages from publishing this file.

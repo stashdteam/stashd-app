@@ -590,7 +590,7 @@
 
   async function readLink(url) {
     var u; try { u = new URL(url); } catch (e) { return { ok: false }; }
-    var blocked = false;
+    var blocked = false, reader = '';
 
     // 0) Stashd's own link reader (Supabase Edge Function "read-link"), when it's deployed.
     if (CLOUD && sb && user) {
@@ -599,9 +599,12 @@
           sb.functions.invoke('read-link', { body: { url: url } }),
           new Promise(function (res) { setTimeout(function () { res(null); }, 15000); })
         ]);
-        if (fr && !fr.error && fr.data && fr.data.ok) return Object.assign({}, fr.data, { ok: true });
-        if (fr && fr.data && fr.data.error === 'blocked') blocked = true;
-      } catch (e) {}
+        if (fr && !fr.error && fr.data && fr.data.ok) return Object.assign({}, fr.data, { ok: true, viaReader: true });
+        if (!fr) reader = 'timeout';
+        else if (fr.error) { var st = fr.error.context && fr.error.context.status; reader = st === 404 ? 'not_deployed' : st === 401 || st === 403 ? 'auth' : 'error ' + (st || fr.error.message || ''); }
+        else if (fr.data) reader = fr.data.error || 'no_product';
+        if (reader === 'blocked') blocked = true;
+      } catch (e) { reader = 'error ' + (e && e.message || ''); }
     }
 
     // 1) Shopify stores (e.g. Nesaa) expose product data at /products/<handle>.js
@@ -649,7 +652,7 @@
         }
       }
     } catch (e) {}
-    return { ok: false, blocked: blocked };
+    return { ok: false, blocked: blocked, reader: reader };
   }
 
   function parseHtml(html, base) {
@@ -723,7 +726,11 @@
 
     var prev = s.querySelector('#prev'), body = s.querySelector('#saveBody');
     prev.innerHTML = previewHtml(it);
-    body.innerHTML = (hint ? '<p class="hint">' + esc(hint) + '</p>' : '') +
+    var READER = { not_deployed: 'not found. Check it\'s deployed and named exactly read-link.', auth: 'refused the request. Sign out and back in, then try again.',
+      blocked: 'the store blocked it.', no_product: 'it opened the page but found no product details.', unreachable: 'it couldn\'t open the page.',
+      not_a_page: 'the link isn\'t a web page.', bad_url: 'the link isn\'t valid.', timeout: 'it took too long.' };
+    var readerLine = info.viaReader ? 'Read by the Stashd reader.' : info.reader ? 'Stashd reader: ' + (READER[info.reader] || info.reader) : '';
+    body.innerHTML = (hint ? '<p class="hint">' + esc(hint) + '</p>' : '') + (readerLine ? '<p class="muted small" style="margin-top:.5rem">' + esc(readerLine) + '</p>' : '') +
       (dupe ? '<p class="hint">You already stashed this link. Saving again adds a second copy.</p>' : '') +
       '<h3>Board</h3>' + boardChips(it) + sizeHtml(it) +
       '<label class="field" style="margin-top:1rem"><span>Note (optional)</span><textarea data-f="note" maxlength="300" placeholder="Wait for payday? Ask for it as a gift?"></textarea></label>' +
