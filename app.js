@@ -889,32 +889,31 @@
   }
 
   function openSetup() {
-    var linkUrl = base() + '?url=', pageUrl = base() + '?d=', script = '';
+    var script = '';
     var isAndroid = /Android/i.test(navigator.userAgent);
     var safari =
-      '<h3>iPhone: from Safari (best for stores like Zara)</h3>' +
-      '<p class="muted small">Reads the product right from the page you\'re looking at, so stores can\'t block it. About 5 minutes, one time.</p>' +
+      '<h3>iPhone: Share from Safari (works with Zara too)</h3>' +
+      '<p class="muted small">One-time setup, about 3 minutes. Stashd reads the product from the page you\'re looking at.</p>' +
+      '<p class="stepnum">Step 1 · Allow scripts</p>' +
+      '<ol class="steps"><li>Open the <b>Settings</b> app.</li><li>Tap <b>Apps</b> → <b>Shortcuts</b> → <b>Advanced</b>.<br><span class="muted small">On older iOS: Settings → Shortcuts → Advanced.</span></li><li>Turn on <b>Allow Running Scripts</b>.</li></ol>' +
+      '<p class="stepnum">Step 2 · Copy the script</p>' +
+      '<div class="stack" style="margin-top:0"><button class="btn primary block" type="button" id="copyScript" disabled>Copy script</button></div>' +
+      '<p class="stepnum">Step 3 · Make the shortcut</p>' +
       '<ol class="steps">' +
-        '<li>Open the <b>Settings</b> app → <b>Apps</b> → <b>Shortcuts</b> → <b>Advanced</b> and turn on <b>Allow Running Scripts</b>.</li>' +
-        '<li>In the <b>Shortcuts</b> app tap <b>+</b>. Tap <b>ⓘ</b> and turn on <b>Show in Share Sheet</b>. At the top, tap the input types and choose only <b>Safari web pages</b>.</li>' +
-        '<li>Add the action <b>Run JavaScript on Web Page</b>. Tap its code, select all, delete, and paste the script (button below).</li>' +
-        '<li>Add <b>URL Encode</b>. Its input should be <b>JavaScript Result</b>.</li>' +
-        '<li>Add <b>Open URLs</b>. Paste the link below, then add <b>URL Encoded Text</b> right after it.</li>' +
-        '<li>Name the shortcut <b>Stashd</b>. On a product page in Safari tap <b>Share</b> → <b>Stashd</b>. The first time, tap <b>Allow</b>.</li>' +
+        '<li>Open the <b>Shortcuts</b> app and tap <b>+</b> (top right).</li>' +
+        '<li>Tap <b>Search Actions</b> at the bottom, type <b>Run JavaScript</b>, and tap <b>Run JavaScript on Web Page</b>.</li>' +
+        '<li>In that block, tap the grey code. Select all, tap <b>Delete</b>, then tap and hold → <b>Paste</b>. Tap <b>Done</b>.</li>' +
+        '<li>If the block says <b>Web Page</b> in blue, tap it and choose <b>Shortcut Input</b>.</li>' +
+        '<li>Tap <b>Search Actions</b> again, type <b>Open URLs</b>, and tap it. It should read <b>Open JavaScript Result</b>.</li>' +
+        '<li>Tap the name at the top → <b>Rename</b> → type <b>Stashd</b>.</li>' +
+        '<li>Tap <b>ⓘ</b> (or the name → <b>Details</b>) and turn on <b>Show in Share Sheet</b>. Tap <b>Done</b>.</li>' +
       '</ol>' +
-      '<div class="row"><button class="btn" type="button" id="copyScript" disabled>Copy script</button><button class="btn" type="button" data-copy="' + esc(pageUrl) + '">Copy link</button></div>' +
-      '<code class="copy">' + esc(pageUrl) + '</code>';
+      '<p class="stepnum">Step 4 · Use it</p>' +
+      '<ol class="steps"><li>Open a product page in <b>Safari</b>.</li><li>Tap <b>Share</b> (square with an arrow), scroll down and tap <b>Stashd</b>.</li><li>The first time, tap <b>Always Allow</b>.</li></ol>';
     var apps =
-      '<h3>iPhone: from Instagram, TikTok and other apps</h3>' +
-      '<p class="muted small">Those apps share just the link, so make a second, simpler shortcut.</p>' +
-      '<ol class="steps">' +
-        '<li>In <b>Shortcuts</b> tap <b>+</b>, tap <b>ⓘ</b> and turn on <b>Show in Share Sheet</b>.</li>' +
-        '<li>Add <b>URL Encode</b> with input <b>Shortcut Input</b>.</li>' +
-        '<li>Add <b>Open URLs</b>: paste the link below, then add <b>URL Encoded Text</b> after it.</li>' +
-        '<li>Name it <b>Stashd link</b>. In any app tap <b>Share</b> → <b>Stashd link</b>.</li>' +
-      '</ol>' +
-      '<div class="row"><button class="btn" type="button" data-copy="' + esc(linkUrl) + '">Copy link</button></div>' +
-      '<code class="copy">' + esc(linkUrl) + '</code>' +
+      '<h3>From Instagram, TikTok and other apps</h3>' +
+      '<p class="muted">Tap <b>Share</b> → <b>Copy link</b>. Then open Stashd, tap <b>+</b> and <b>Paste</b>.</p>' +
+      '<p class="muted small">Tip: for stores that block reading (like Zara), tap the link to open it in Safari first, then use Share → Stashd.</p>' +
       (CLOUD ? '' : '<p class="hint">Use Stashd in Safari rather than from a home-screen icon. On iPhone, a home-screen web app keeps a separate stash.</p>');
     var android =
       '<h3>Android</h3>' +
@@ -934,7 +933,7 @@
     s.querySelectorAll('[data-copy]').forEach(function (b) { b.onclick = function () { copy(b.dataset.copy, 'Link'); }; });
     var cs = s.querySelector('#copyScript'), box = s.querySelector('#scriptBox');
     fetch('shortcut.js?v=' + Date.now()).then(function (r) { return r.text(); }).then(function (txt) {
-      script = txt; box.value = txt; cs.disabled = false;
+      script = txt.replace(/var STASHD = '[^']*';/, "var STASHD = '" + base() + "';"); box.value = script; cs.disabled = false;
     }).catch(function () { box.value = 'Couldn\'t load the script. Check your connection.'; });
     cs.onclick = function () {
       (navigator.clipboard ? navigator.clipboard.writeText(script) : Promise.reject()).then(function () { toast('Script copied'); })

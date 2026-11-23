@@ -1,5 +1,7 @@
 /* Stashd: "Run JavaScript on Web Page" script for the iPhone Shortcut.
-   Runs inside the store page in your own Safari and sends the product details to Stashd. */
+   Runs inside the store page in your own Safari and returns a Stashd link with the product details.
+   The Shortcut's next action, "Open URLs", opens that link. */
+var STASHD = 'https://stashdteam.github.io/stashd-app/';
 var q = function (s) { var e = document.querySelector(s); return e ? (e.getAttribute('content') || '').trim() : ''; };
 var txt = function (e) { return e ? (e.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40) : ''; };
 var r = {
@@ -45,4 +47,4 @@ if (!r.p) {
   r.wt = pick(['[class*="price" i] del', '[class*="price" i] s', 'del', 's', '[class*="old-price" i]', '[class*="price-old" i]', '[class*="compare" i]', '[class*="crossed" i]', '[class*="original-price" i]'], true);
 }
 if (r.s == null) r.s = /\b(sold out|out of stock|agotado)\b/i.test(txt(document.querySelector('[class*="stock" i], [class*="availability" i], button[disabled][class*="add" i]')));
-completion(JSON.stringify(r));
+completion(STASHD + '?d=' + encodeURIComponent(JSON.stringify(r)));

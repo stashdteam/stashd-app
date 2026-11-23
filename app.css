@@ -283,3 +283,4 @@ body.locked #toast{top:calc(.75rem + env(safe-area-inset-top));bottom:auto;trans
 body.locked #toast.show{transform:translate(-50%,0)}
 #toast{opacity:0;visibility:hidden;transition:transform .25s ease,opacity .2s ease,visibility 0s linear .25s}
 #toast.show{opacity:1;visibility:visible;transition:transform .25s ease,opacity .2s ease}
+.stepnum{font-weight:800;font-size:.875rem;margin:1rem 0 .3rem;color:var(--accent)}
