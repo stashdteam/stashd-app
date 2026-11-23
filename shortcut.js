@@ -4,6 +4,7 @@
 var STASHD = 'https://stashdteam.github.io/stashd-app/';
 var q = function (s) { var e = document.querySelector(s); return e ? (e.getAttribute('content') || '').trim() : ''; };
 var txt = function (e) { return e ? (e.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40) : ''; };
+var imgs = [];
 var r = {
   u: location.href,
   t: q('meta[property="og:title"]') || document.title,
@@ -22,7 +23,8 @@ document.querySelectorAll('script[type="application/ld+json"]').forEach(function
       if (o.offers) o = [].concat(o.offers)[0] || o;
       r.t = n.name || r.t;
       r.b = (n.brand && (n.brand.name || (typeof n.brand === 'string' ? n.brand : ''))) || r.b;
-      var im = [].concat(n.image || [])[0]; r.i = (im && (im.url || im)) || r.i;
+      var ims = [].concat(n.image || []).map(function (x) { return x && (x.url || x); }).filter(Boolean);
+      r.i = ims[0] || r.i; imgs = imgs.concat(ims);
       r.p = o.price || o.lowPrice || r.p;
       r.c = o.priceCurrency || r.c;
       if (o.availability) r.s = /OutOfStock|SoldOut/i.test(o.availability);
@@ -53,5 +55,17 @@ if (!r.p && !r.pt) {
   var list = all.match(/"(?:listPrice|regularPrice|originalPrice)"\s*:\s*"?([£$€]?\s?\d[\d.,]*)/i) || all.match(/"price"\s*:\s*"([£$€]\s?\d[\d.,]*)"/i);
   if (sale || list) { r.pt = (sale || list)[1]; if (sale && list) r.wt = list[1]; }
 }
+// All product photos (up to 8): structured data, every og:image, then big images on the page
+document.querySelectorAll('meta[property="og:image"]').forEach(function (m) { imgs.push(m.getAttribute('content')); });
+if (imgs.length < 3) document.querySelectorAll('main img, [class*="product" i] img, [class*="gallery" i] img').forEach(function (el) {
+  if ((el.naturalWidth || el.width) >= 300) imgs.push(el.currentSrc || el.src);
+});
+var seen = {};
+r.im = imgs.filter(function (u) {
+  if (!u || /^data:|\.svg(\?|$)|logo|icon|sprite/i.test(u)) return false;
+  try { u = new URL(u, location.href).href; } catch (e) { return false; }
+  var k = u.replace(/[?#].*$/, '').replace(/_(\d+x\d*|\d*x\d+)(?=\.\w+$)/, '');
+  if (seen[k]) return false; seen[k] = 1; return true;
+}).map(function (u) { return new URL(u, location.href).href; }).slice(0, 8);
 if (r.s == null) r.s = /\b(sold out|out of stock|agotado)\b/i.test(txt(document.querySelector('[class*="stock" i], [class*="availability" i], button[disabled][class*="add" i]')));
 completion(STASHD + '?d=' + encodeURIComponent(JSON.stringify(r)));

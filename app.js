@@ -56,7 +56,7 @@
   var CFG = window.STASHD_CONFIG || {};
   var CLOUD = !!(CFG.supabaseUrl && CFG.supabaseKey);
   var sb = null;
-  var COLS = ['id', 'user_id', 'board_id', 'url', 'title', 'brand', 'image_url', 'price', 'was_price', 'currency', 'size', 'sizes', 'note', 'sold_out', 'bought', 'in_budget', 'home_price', 'home_currency', 'created_at'];
+  var COLS = ['id', 'user_id', 'board_id', 'url', 'title', 'brand', 'image_url', 'price', 'was_price', 'currency', 'size', 'sizes', 'note', 'sold_out', 'bought', 'in_budget', 'home_price', 'home_currency', 'images', 'created_at'];
   function row(it) { var r = {}; COLS.forEach(function (k) { if (it[k] !== undefined) r[k] = it[k]; }); return r; }
   function base() { return location.origin + location.pathname.replace(/index\.html$/, ''); }
   function syncFail(e) { if (window.console) console.error(e); toast("Couldn't sync. " + ((e && e.message) || 'Check your connection.')); return false; }
@@ -253,6 +253,7 @@
       title: String(d.t || '').replace(/\s*[|–-]\s*(zara|h&m|mango)[^|–-]*$/i, '').trim().slice(0, 140),
       brand: String(d.b || '').trim().slice(0, 60),
       image_url: absUrl(d.i, base),
+      images: (Array.isArray(d.im) ? d.im : []).map(function (u) { return absUrl(u, base); }).filter(Boolean).slice(0, 10),
       price: amount(d.p) != null ? amount(d.p) : amount(d.pt),
       was_price: amount(d.wt),
       currency: String(d.c || currencyIn(d.pt) || currencyIn(d.wt) || '').toUpperCase().slice(0, 3),
@@ -802,12 +803,36 @@
     var a = homeAmt(it);
     return a == null ? '' : '<small class="conv1">≈ ' + esc(money(a, user.currency)) + '</small>';
   }
+  // All of an item's photos, cover first.
+  function allImages(it) {
+    var seen = {}, out = [];
+    [it.image_url].concat(it.images || []).forEach(function (u) { if (safeImg(u) && !seen[u]) { seen[u] = 1; out.push(u); } });
+    return out;
+  }
+  function heroHtml(it, id) {
+    var imgs = allImages(it);
+    if (!imgs.length) return '<div class="hero-img none"' + (id ? ' id="' + id + '"' : '') + '>' + letter(it) + tagsHtml(it) + '</div>';
+    return '<div class="hero-img' + (imgs.length > 1 ? ' gal' : '') + '"' + (id ? ' id="' + id + '"' : '') + '>' +
+      '<div class="track">' + imgs.map(function (u, i) { return '<img src="' + esc(u) + '" alt="Photo ' + (i + 1) + ' of ' + imgs.length + '"' + (i ? ' loading="lazy"' : '') + ' referrerpolicy="no-referrer">'; }).join('') + '</div>' +
+      tagsHtml(it) + (imgs.length > 1 ? '<div class="dots" aria-hidden="true">' + imgs.map(function (u, i) { return '<i' + (i ? '' : ' class="on"') + '></i>'; }).join('') + '</div><span class="count">1/' + imgs.length + '</span>' : '') + '</div>';
+  }
+  // Swipe through photos; onSlide(url) tells the caller which photo is showing.
+  function bindGallery(hero, onSlide) {
+    var track = hero && hero.querySelector('.track'); if (!track) return;
+    var imgs = track.querySelectorAll('img'), dots = hero.querySelectorAll('.dots i'), count = hero.querySelector('.count');
+    track.addEventListener('scroll', function () {
+      var i = Math.round(track.scrollLeft / Math.max(1, track.clientWidth));
+      dots.forEach(function (d, j) { d.classList.toggle('on', j === i); });
+      if (count) count.textContent = (i + 1) + '/' + imgs.length;
+      if (onSlide && imgs[i]) onSlide(imgs[i].getAttribute('src'));
+    }, { passive: true });
+  }
   function previewHtml(it) {
     var img = safeImg(it.image_url);
     return '<div class="preview"><div class="pimg' + (img ? '' : ' none') + '">' + (img ? '<img src="' + esc(img) + '" alt="" referrerpolicy="no-referrer">' : letter(it)) + '</div>' +
       '<div><b>' + esc(it.title || 'Untitled item') + '</b>' + (it.brand ? '<small class="brand">' + esc(it.brand) + '</small>' : '') +
       (it.price != null ? '<div class="price">' + esc(money(it.price, it.currency)) + (it.was_price > it.price ? '<s>' + esc(fmt(it.was_price)) + '</s>' : '') + '</div>' : '') +
-      convLine(it) + tagsHtml(it, true) + '</div></div>';
+      convLine(it) + tagsHtml(it, true) + (allImages(it).length > 1 ? '<small class="pcount">' + allImages(it).length + ' photos</small>' : '') + '</div></div>';
   }
 
   /* ---------- link reading ---------- */
@@ -854,6 +879,7 @@
             ok: true, source: 'shopify',
             title: p.title || '', brand: p.vendor || '',
             image_url: absUrl((v && v.featured_image) || p.featured_image || (p.images && p.images[0]), u.origin),
+            images: (p.images || []).slice(0, 10).map(function (x) { return absUrl(x, u.origin); }),
             price: price != null ? price / 100 : null,
             was_price: was && was > price ? was / 100 : null,
             currency: currency, sold_out: (v || p).available === false,
@@ -945,14 +971,15 @@
       size: '', note: '', sold_out: false, bought: false, created_at: '', sizes: []
     };
     var s = sheet('<h2>' + (src ? 'Save to my stash' : 'Save to Stashd') + '</h2><div id="prev">' + previewHtml(it) + '</div><div id="saveBody"><p class="loading muted">Reading the link…</p></div>');
-    var info = src ? { ok: true, copied: true, title: src.title, brand: src.brand, image_url: src.image_url, price: src.price, was_price: src.was_price, currency: src.currency, sold_out: src.sold_out, sizes: src.sizes || [] } : fromShortcut(pre);
+    var info = src ? { ok: true, copied: true, title: src.title, brand: src.brand, image_url: src.image_url, images: src.images || [], price: src.price, was_price: src.was_price, currency: src.currency, sold_out: src.sold_out, sizes: src.sizes || [] } : fromShortcut(pre);
     if (!src && (!info || !info.ok || info.price == null)) {     // nothing (or no price) from the Shortcut: try the reader too
       var more = await readLink(url).catch(function () { return { ok: false }; });
       if (!info || !info.ok) info = more;
-      else ['image_url', 'price', 'was_price', 'currency', 'sizes', 'brand'].forEach(function (k) { if ((info[k] == null || info[k] === '') && more[k] != null && more[k] !== '') info[k] = more[k]; });
+      else ['image_url', 'images', 'price', 'was_price', 'currency', 'sizes', 'brand'].forEach(function (k) { if ((info[k] == null || info[k] === '') && more[k] != null && more[k] !== '') info[k] = more[k]; });
     }
     if (!document.body.contains(s)) return;
-    ['title', 'brand', 'image_url', 'price', 'was_price', 'sold_out', 'sizes'].forEach(function (k) { if (info[k] != null && info[k] !== '') it[k] = info[k]; });
+    ['title', 'brand', 'image_url', 'price', 'was_price', 'sold_out', 'sizes', 'images'].forEach(function (k) { if (info[k] != null && info[k] !== '') it[k] = info[k]; });
+    it.images = allImages(it).slice(0, 10);
     if (info.currency) it.currency = String(info.currency).toUpperCase();
     else if (guessCurrency(url)) it.currency = guessCurrency(url);
     if (src && src.size) it.size = src.size;
@@ -1005,7 +1032,7 @@
     var mine = it.user_id === user.id, canDelete = mine || roleOf(it.board_id) === 'owner';
     var img = safeImg(it.image_url);
     var s = sheet(
-      '<div class="hero-img' + (img ? '' : ' none') + '" id="iHero">' + (img ? '<img src="' + esc(img) + '" alt="" referrerpolicy="no-referrer">' : letter(it)) + tagsHtml(it) + '</div>' +
+      heroHtml(it, 'iHero') + '<div class="coverrow" id="coverRow" hidden><button class="btn small" type="button" id="coverBtn">Set as cover photo</button></div>' +
       '<div id="iHead"></div>' +
       '<div class="row act">' +
         (safeLink(it.url) ? '<a class="btn primary" id="openStore" href="' + esc(safeLink(it.url)) + '" target="_blank" rel="noopener noreferrer">Open store page</a>' : '') +
@@ -1023,6 +1050,16 @@
       (canDelete ? '<div class="stack"><button class="link danger" type="button" id="delBtn">Delete item</button></div>'
         : '<p class="muted small" style="margin-top:1rem;text-align:center">Only the person who added this item or the board owner can delete it.</p>'));
     var head = s.querySelector('#iHead'), hero = s.querySelector('#iHero'), bb = s.querySelector('#boughtBtn');
+    var showing = it.image_url;
+    function wireGallery() {
+      var row = s.querySelector('#coverRow');
+      bindGallery(hero, function (u) { showing = u; row.hidden = !u || u === it.image_url; });
+    }
+    wireGallery();
+    s.querySelector('#coverBtn').onclick = function () {
+      it.images = allImages(it); it.image_url = showing; api.saveItemSoon(it); renderHome();
+      s.querySelector('#coverRow').hidden = true; toast('Cover photo updated');
+    };
     function paint() {
       head.innerHTML = '<h2 style="margin-right:0">' + esc(it.title || 'Untitled item') + '</h2>' +
         '<p class="muted"><span class="brand">' + esc(it.brand) + '</span>' + (it.board_id ? ' · ' + esc(boardName(it.board_id)) : '') + '</p>' +
@@ -1032,7 +1069,7 @@
     }
     var change = function (f) {
       api.saveItemSoon(it); paint(); renderHome();
-      if (f === 'image_url') { hero.classList.remove('none'); hero.innerHTML = '<img src="' + esc(safeImg(it.image_url)) + '" alt="">' + tagsHtml(it); }
+      if (f === 'image_url') { it.images = [it.image_url].concat((it.images || []).filter(function (u) { return u !== it.image_url; })).slice(0, 10); hero.outerHTML = heroHtml(it, 'iHero'); hero = s.querySelector('#iHero'); wireGallery(); }
       if (f === 'url') { var a = s.querySelector('#openStore'); if (a && safeLink(it.url)) a.href = safeLink(it.url); }
     };
     paint();
@@ -1102,7 +1139,7 @@
   async function copyItem(src, bid) {
     var mine = src.user_id === user.id;
     var it = {
-      id: uid(), user_id: user.id, board_id: bid, url: src.url, title: src.title, brand: src.brand, image_url: src.image_url,
+      id: uid(), user_id: user.id, board_id: bid, url: src.url, title: src.title, brand: src.brand, image_url: src.image_url, images: src.images || [],
       price: src.price, was_price: src.was_price, currency: src.currency, home_price: src.home_currency === user.currency ? src.home_price : null, home_currency: src.home_currency === user.currency ? src.home_currency : null,
       size: src.size || '', sizes: src.sizes || [], note: mine ? (src.note || '') : '', sold_out: !!src.sold_out, bought: false, in_budget: true, created_at: new Date().toISOString()
     };
@@ -1392,13 +1429,14 @@
 
   function openItemView(it) {
     var img = safeImg(it.image_url);
-    var s = sheet('<div class="hero-img' + (img ? '' : ' none') + '">' + (img ? '<img src="' + esc(img) + '" alt="" referrerpolicy="no-referrer">' : letter(it)) + tagsHtml(it) + '</div>' +
+    var s = sheet(heroHtml(it, 'vHero') +
       '<h2 style="margin-right:0">' + esc(it.title || 'Untitled item') + '</h2>' +
       '<p class="muted"><span class="brand">' + esc(it.brand || '') + '</span>' + (it.size ? ' · Size ' + esc(it.size) : '') + (it.bought ? ' · Bought' : '') + '</p>' +
       (it.price != null ? '<div class="price">' + esc(money(it.price, it.currency)) + (it.was_price > it.price ? '<s>' + esc(fmt(it.was_price)) + '</s>' : '') + '</div>' : '') +
       (it.note ? '<p class="hint">' + esc(it.note) + '</p>' : '') +
       '<div class="stack">' + (safeLink(it.url) ? '<a class="btn primary block" href="' + esc(safeLink(it.url)) + '" target="_blank" rel="noopener noreferrer">Open store page</a>' : '') +
       (user ? '<button class="btn block" type="button" id="copyToMine">Save to my board</button>' : '') + '</div>');
+    bindGallery(s.querySelector('#vHero'));
     var c = s.querySelector('#copyToMine'); if (c) c.onclick = function () { pickBoard('Save to…', null, function (bid) { copyItem(it, bid); }); };
   }
 
@@ -1548,13 +1586,19 @@
       '<p class="muted small">' + n + ' item' + (n === 1 ? '' : 's') + (own ? (secret ? ' · Private' : CLOUD ? ' · Public' + (b.save_count ? ' · ' + b.save_count + ' save' + (b.save_count === 1 ? '' : 's') : '') : '') : ' · Shared by @' + esc((b.owner && b.owner.username) || '') + ' · ' + (b.role === 'editor' ? 'you can add' : 'view only')) + '</p>' +
       '<div class="bact">' +
         (CLOUD ? '<button class="collab" type="button" id="collabBtn" aria-label="' + (own ? 'Invite collaborators' : 'See who\'s on this board') + '">' + stackHtml(b) + (own ? '<span class="av add">+</span>' : '') + '</button>' : '') +
+        (own ? '<button class="pill tog" type="button" id="budgetTog" role="switch" aria-checked="' + (b.in_budget !== false) + '"><span class="knob" aria-hidden="true"></span>Budget</button>' : '') +
         '<span class="grow"></span>' +
         (CLOUD ? '<button class="icon soft" type="button" id="shareB" aria-label="Share board">' + SHARE_SVG + '</button>' : '') +
         '<button class="icon soft" type="button" id="moreB" aria-label="' + (own ? 'Edit board' : 'Board info') + '">' + MORE_SVG + '</button>' +
-      '</div>' + (own ? budgetHtml(b, items) : '') + '</section>';
+      '</div>' + (own && b.in_budget !== false ? budgetHtml(b, items) : '') + '</section>';
   }
   function bindBoardHeader(b, own) {
     var bb = document.getElementById('budgetBtn'); if (bb) bb.onclick = function () { openBoardEditor(b, null, 'budget'); };
+    var bt = document.getElementById('budgetTog');
+    if (bt) bt.onclick = function () {
+      b.in_budget = b.in_budget === false; api.saveBoard(b); renderHome();
+      toast(b.in_budget ? (b.budget == null || b.budget === '' ? 'Budget on. Add an amount to track it' : 'Budget on') : 'Budget off. This board isn\'t counted in your totals');
+    };
     var cb = document.getElementById('collabBtn'); if (cb) cb.onclick = function () { own ? openInvite(b) : openBoardInfo(b); };
     var sh = document.getElementById('shareB'); if (sh) sh.onclick = function () { openShare(b); };
     document.getElementById('moreB').onclick = function () { own ? openBoardEditor(b) : openBoardInfo(b); };
@@ -1582,14 +1626,14 @@
     var s = sheet('<h2>' + (isNew ? 'Create board' : 'Edit board') + '</h2><form id="beForm" novalidate>' +
       '<label class="field"><span>Name</span><input type="text" name="name" maxlength="40" placeholder="Like “Eid outfits” or “Home”" value="' + esc(d.name) + '" autocapitalize="sentences" required><small class="ferr" id="beErr"></small></label>' +
       (CLOUD ? switchHtml('secretSw', 'Private', 'On: only you and people you invite can see it. Off: public on your profile.', d.visibility !== 'public') : '') +
-      '<label class="field" style="margin-top:1rem"><span>Budget (optional)</span><span class="cur"><input type="text" inputmode="decimal" name="budget" placeholder="e.g. 10,000" value="' + (d.budget == null ? '' : esc(d.budget)) + '"><em>' + esc(user.currency) + '</em></span>' +
-        '<small class="help">We\'ll show what\'s left as you mark things bought.</small></label>' +
-      switchHtml('budgetSw', 'Include in my totals', 'Count this board in To buy and Spent under All.', d.in_budget !== false) +
+      '<div style="margin-top:.6rem">' + switchHtml('budgetSw', 'Budget', 'Track spending here and count it in your totals.', d.in_budget !== false) + '</div>' +
+      '<label class="field" id="budgetAmt" style="margin-top:.6rem"' + (d.in_budget === false ? ' hidden' : '') + '><span>Amount (optional)</span><span class="cur"><input type="text" inputmode="decimal" name="budget" placeholder="e.g. 10,000" value="' + (d.budget == null ? '' : esc(d.budget)) + '"><em>' + esc(user.currency) + '</em></span></label>' +
       (!isNew && CLOUD ? '<h3>Collaborators</h3><button class="person" type="button" id="manageCollab">' + stackHtml(b) + '<span><b>Invite or manage people</b><small>Choose who can view or add</small></span><em>›</em></button>' : '') +
       '<div class="stack"><button class="btn primary block" type="submit">' + (isNew ? 'Create' : 'Done') + '</button>' +
       (isNew ? '' : '<button class="link danger" type="button" id="bDel">Delete board</button>') + '</div></form>');
     if (isNew) setTimeout(function () { s.querySelector('[name=name]').focus(); }, 80);
     if (focus === 'budget') setTimeout(function () { s.querySelector('[name=budget]').focus(); }, 80);
+    s.querySelector('#budgetSw').onchange = function (e) { s.querySelector('#budgetAmt').hidden = !e.target.checked; };
     var mc = s.querySelector('#manageCollab'); if (mc) mc.onclick = function () { openInvite(b); };
     s.querySelector('#beForm').onsubmit = function (e) {
       e.preventDefault();

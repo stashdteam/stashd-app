@@ -16,7 +16,7 @@ const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (
 const MAX_BYTES = 3_000_000;
 
 type Product = {
-  ok: boolean; source?: string; title?: string; brand?: string; image_url?: string;
+  ok: boolean; source?: string; title?: string; brand?: string; image_url?: string; images?: string[];
   price?: number | null; was_price?: number | null; currency?: string; sold_out?: boolean; sizes?: string[];
   error?: string;
 };
@@ -84,6 +84,18 @@ function num(v: unknown): number | null {
   return isFinite(n) ? n : null;
 }
 function symbolCurrency(s: string) { return /£/.test(s) ? "GBP" : /€/.test(s) ? "EUR" : /\$/.test(s) ? "USD" : ""; }
+// Up to 10 different photos; drops repeats of the same image at another size (?width=…) and tiny icons.
+export function uniqImages(list: string[]): string[] {
+  const seen = new Set<string>(), out: string[] = [];
+  for (const u of list) {
+    if (!u || /\.svg(\?|$)|logo|icon|sprite|placeholder/i.test(u)) continue;
+    const key = u.replace(/^https?:/, "").replace(/[?#].*$/, "").replace(/_(\d+x\d*|\d*x\d+|small|medium|large|grande|compact|master)(?=\.\w+$)/i, "");
+    if (seen.has(key)) continue;
+    seen.add(key); out.push(u);
+    if (out.length >= 10) break;
+  }
+  return out;
+}
 function decode(s: string) {
   return s.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
     .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d)).replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16))).trim();
@@ -115,6 +127,7 @@ async function shopify(u: URL): Promise<Product | null> {
   return {
     ok: true, source: "shopify", title: p.title, brand: p.vendor || "",
     image_url: abs((v && v.featured_image) || p.featured_image || (p.images || [])[0], u),
+    images: uniqImages([(v && v.featured_image) || p.featured_image].concat(p.images || []).map((x: unknown) => abs(x, u))),
     price, was_price: was, currency, sold_out: src.available === false,
     sizes: sizeOpt?.values ? sizeOpt.values.map(String).slice(0, 20) : [],
   };
@@ -122,6 +135,9 @@ async function shopify(u: URL): Promise<Product | null> {
 
 // 2) Any page: product data published for Google (JSON-LD) and social previews (Open Graph)
 export function parseHtml(html: string, base: URL): Product {
+  // Every og:image on the page (stores often list several)
+  const ogImgs = [...html.matchAll(/<meta[^>]+(?:property|name)=["'](?:og:image|og:image:secure_url|twitter:image)["'][^>]*>/gi)]
+    .map((m) => m[0].match(/content=["']([^"']*)["']/i)?.[1] || "").filter(Boolean).map((x) => abs(decode(x), base));
   const meta = (name: string) => {
     const re = new RegExp(`<meta[^>]+(?:property|name|itemprop)=["']${name.replace(/[:.]/g, "\\$&")}["'][^>]*>`, "i");
     const tag = html.match(re)?.[0];
@@ -158,7 +174,9 @@ export function parseHtml(html: string, base: URL): Product {
     const o = allOffers.find((x: any) => x && (x.price != null || x.lowPrice != null)) || {};
     out.title = prod.name ? decode(String(prod.name)) : out.title;
     out.brand = (prod.brand && (prod.brand.name || (typeof prod.brand === "string" ? prod.brand : ""))) || out.brand;
-    out.image_url = abs(([] as any[]).concat(prod.image || [])[0], base) || out.image_url;
+    const ldImgs = ([] as any[]).concat(prod.image || []).concat(variants.flatMap((v: any) => [].concat(v.image || []))).map((x: unknown) => abs(x, base));
+    out.image_url = ldImgs[0] || out.image_url;
+    out.images = uniqImages(ldImgs.concat(ogImgs));
     if (out.price == null) out.price = num(o.price ?? o.lowPrice);
     out.currency = out.currency || o.priceCurrency || "";
     const spec = ([] as any[]).concat(o.priceSpecification || []).find((s: any) => /ListPrice|StrikethroughPrice/i.test(String(s?.priceType || "")));
@@ -186,6 +204,7 @@ export function parseHtml(html: string, base: URL): Product {
     }
   }
   if (out.was_price != null && out.price != null && out.was_price <= out.price) out.was_price = null;
+  out.images = uniqImages([out.image_url || ""].concat(out.images || [], ogImgs));
   out.title = (out.title || "").slice(0, 200);
   out.ok = !!out.title && !/access denied|just a moment|attention required|robot|captcha/i.test(out.title);
   return out;
