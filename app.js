@@ -64,7 +64,16 @@
   var api = {
     saveItem: function (it) { clearTimeout(saveTimers[it.id]); return CLOUD ? sb.from('items').upsert(row(it)).then(done, syncFail) : Promise.resolve(persist()); },
     saveItemSoon: function (it) { clearTimeout(saveTimers[it.id]); if (!CLOUD) return persist(); saveTimers[it.id] = setTimeout(function () { api.saveItem(it); }, 600); },
-    deleteItem: function (id) { clearTimeout(saveTimers[id]); return CLOUD ? sb.from('items').delete().eq('id', id).then(done, syncFail) : Promise.resolve(persist()); },
+    deleteItem: function (id) {
+      clearTimeout(saveTimers[id]);
+      if (!CLOUD) return Promise.resolve(persist());
+      // A delete that isn't allowed removes 0 rows without an error, so check what came back.
+      return sb.from('items').delete().eq('id', id).select('id').then(function (r) {
+        if (r.error) return syncFail(r.error);
+        if (!r.data || !r.data.length) { toast('Couldn\'t delete it. Only the person who added it or the board owner can.'); return false; }
+        return true;
+      }, syncFail);
+    },
     saveBoard: function (b) { return CLOUD ? sb.from('boards').upsert({ id: b.id, user_id: b.user_id, name: b.name, created_at: b.created_at, visibility: b.visibility || 'private', link_token: b.link_token || null, in_budget: b.in_budget !== false, budget: b.budget == null ? null : b.budget }).then(done, syncFail) : Promise.resolve(persist()); },
     deleteBoard: function (id) { return CLOUD ? sb.from('boards').delete().eq('id', id).then(done, syncFail) : Promise.resolve(persist()); },
     saveProfile: function () {
@@ -174,6 +183,20 @@
     document.body.classList.add('locked');
     if (!locked) o.addEventListener('click', function (e) { if (e.target === o || e.target.closest('.x')) closeSheet(); });
     return o.querySelector('.sheet');
+  }
+  function askConfirm(message, okLabel) {
+    return new Promise(function (resolve) {
+      var o = document.createElement('div');
+      o.className = 'overlay ask';
+      o.innerHTML = '<div class="sheet small" role="alertdialog" aria-modal="true"><p class="askmsg">' + esc(message) + '</p>' +
+        '<div class="row"><button class="btn" type="button" data-no>Cancel</button><button class="btn primary danger-bg" type="button" data-yes>' + esc(okLabel || 'Delete') + '</button></div></div>';
+      document.body.appendChild(o);
+      function done(v) { o.remove(); resolve(v); }
+      o.querySelector('[data-yes]').onclick = function () { done(true); };
+      o.querySelector('[data-no]').onclick = function () { done(false); };
+      o.addEventListener('click', function (e) { if (e.target === o) done(false); });
+      setTimeout(function () { o.querySelector('[data-yes]').focus(); }, 50);
+    });
   }
   function closeSheet() { document.querySelectorAll('.overlay').forEach(function (o) { o.remove(); }); document.body.classList.remove('locked'); }
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !document.querySelector('.overlay.locked')) closeSheet(); });
@@ -996,7 +1019,8 @@
       switchHtml('soldSw', 'Sold out', '', it.sold_out) +
       (mine && !(CLOUD && sharedBoard(it.board_id)) ? switchHtml('budgetSw', 'Count in budget and totals', 'Turn off for gifts, wishes or anything you\'re not paying for.', it.in_budget !== false) : '') +
       detailsHtml(it, false) +
-      (canDelete ? '<div class="stack"><button class="link danger" type="button" id="delBtn">Delete item</button></div>' : ''));
+      (canDelete ? '<div class="stack"><button class="link danger" type="button" id="delBtn">Delete item</button></div>'
+        : '<p class="muted small" style="margin-top:1rem;text-align:center">Only the person who added this item or the board owner can delete it.</p>'));
     var head = s.querySelector('#iHead'), hero = s.querySelector('#iHero'), bb = s.querySelector('#boughtBtn');
     function paint() {
       head.innerHTML = '<h2 style="margin-right:0">' + esc(it.title || 'Untitled item') + '</h2>' +
@@ -1054,11 +1078,13 @@
       setTimeout(function () { toast(it.bought ? 'Marked as bought at ' + money(it.price, it.currency) + '. Enjoy it!' : 'Moved back to To buy'); }, 900);
     };
     var del = s.querySelector('#delBtn');
-    if (del) del.onclick = function () {
-      if (!confirm('Delete "' + (it.title || 'this item') + '"?')) return;
+    if (del) del.onclick = async function () {
+      if (!(await askConfirm('Delete "' + (it.title || 'this item') + '"? This can\'t be undone.', 'Delete'))) return;
+      del.disabled = true; del.textContent = 'Deleting…';
+      if (!(await api.deleteItem(it.id))) { del.disabled = false; del.textContent = 'Delete item'; return; }
       db.items = db.items.filter(function (i) { return i.id !== it.id; });
       Object.keys(cache).forEach(function (k) { if (cache[k]) cache[k] = cache[k].filter(function (i) { return i.id !== it.id; }); });
-      api.deleteItem(it.id); closeSheet(); renderHome(); toast('Item deleted');
+      closeSheet(); renderHome(); toast('Item deleted');
     };
   }
   // Pick one of my boards (or a board shared with me where I can add).
@@ -1107,8 +1133,7 @@
     var mpe = s.querySelector('#mPeople'); if (mpe) mpe.onclick = openPeople;
     s.querySelector('#mOut').onclick = signOut;
     s.querySelector('#mDel').onclick = function () {
-      if (!confirm('Delete your account and everything in your stash on this device? This can\'t be undone.')) return;
-      deleteAccount();
+      askConfirm('Delete your account and everything in your stash? This can\'t be undone.', 'Delete account').then(function (ok) { if (ok) deleteAccount(); });
     };
   }
 
@@ -1568,8 +1593,8 @@
       renderHome();
     };
     var del = s.querySelector('#bDel');
-    if (del) del.onclick = function () {
-      if (!confirm('Delete the board "' + b.name + '"? Your items stay in All.' + (CLOUD ? ' People you shared it with lose access.' : ''))) return;
+    if (del) del.onclick = async function () {
+      if (!(await askConfirm('Delete the board "' + b.name + '"? Your items stay in All.' + (CLOUD ? ' People you shared it with lose access.' : ''), 'Delete board'))) return;
       db.boards = db.boards.filter(function (x) { return x.id !== b.id; });
       db.items = db.items.filter(function (i) { return i.board_id !== b.id || i.user_id === user.id; });
       db.items.forEach(function (i) { if (i.board_id === b.id) i.board_id = null; });
@@ -1690,7 +1715,7 @@
     var ol = s.querySelector('#ownerLink'); if (ol) ol.onclick = function () { closeSheet(); nav({ u: b.owner.username }); };
     s.querySelector('#shareBtn').onclick = function () { openShare(b); };
     s.querySelector('#leave').onclick = async function () {
-      if (!confirm('Leave "' + b.name + '"? You\'ll need to be invited again to see it.')) return;
+      if (!(await askConfirm('Leave "' + b.name + '"? You\'ll need to be invited again to see it.', 'Leave'))) return;
       var r = await sb.from('board_members').delete().eq('board_id', b.id).eq('user_id', user.id);
       if (r.error) return toast(friendly(r.error));
       db.shared = db.shared.filter(function (x) { return x.id !== b.id; }); ui.board = 'all'; closeSheet(); renderHome(); toast('You left the board');

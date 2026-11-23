@@ -340,3 +340,12 @@ body.locked #toast.show{transform:translate(-50%,0)}
 .note small s{margin-left:.2rem}
 .nic{width:2rem;height:2rem;border-radius:50%;display:grid;place-items:center;font-weight:800;flex:none;background:var(--sold-bg);color:var(--sold-ink)}
 .k-price_drop .nic,.k-back_in_stock .nic{background:var(--off-bg);color:var(--off-ink)}
+
+/* in-app confirm (instead of the browser's pop-up, which iPhone Safari can block) */
+.overlay.ask{z-index:30;align-items:center;padding:1rem}
+.sheet.small{max-width:22rem;border-radius:1.2rem;padding:1.3rem 1.2rem}
+.askmsg{font-weight:600;margin-bottom:1rem;line-height:1.4}
+.btn.danger-bg{background:#b4442c;border-color:#b4442c;color:#fff}
+/* room at the bottom of sheets so the last button isn't hidden behind Safari's floating toolbar */
+.sheet{padding-bottom:calc(5rem + env(safe-area-inset-bottom))}
+@media (min-width:640px){.sheet{padding-bottom:1.5rem}}
