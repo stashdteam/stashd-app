@@ -349,3 +349,25 @@ body.locked #toast.show{transform:translate(-50%,0)}
 /* room at the bottom of sheets so the last button isn't hidden behind Safari's floating toolbar */
 .sheet{padding-bottom:calc(5rem + env(safe-area-inset-bottom))}
 @media (min-width:640px){.sheet{padding-bottom:1.5rem}}
+
+/* minimal budget card */
+.budget{padding:.9rem 1rem .8rem}
+.budget .brow{justify-content:flex-start;gap:.4rem;align-items:baseline}
+.budget .brow b{font-size:1.5rem;letter-spacing:-.02em}
+.budget .brow span{color:var(--muted);font-weight:600}
+.budget .bar{height:.4rem;margin:.6rem 0 .5rem}
+.blegend{display:flex;gap:.9rem;flex-wrap:wrap;font-size:.75rem}
+.blegend .of{margin-left:auto}
+.budget.empty{padding:.7rem 1rem;font-weight:700;color:var(--accent);font-size:.9375rem}
+.bhint{display:none}
+
+/* explore */
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:1rem .75rem}
+@media (min-width:720px){.tiles{grid-template-columns:repeat(3,1fr)}}
+.tile{text-align:left;display:block}
+.tile .col{display:grid;grid-template-columns:2fr 1fr;gap:2px;aspect-ratio:3/2;border-radius:1rem;overflow:hidden;margin-bottom:.45rem;background:var(--line)}
+.tile .col2{display:grid;grid-template-rows:1fr 1fr;gap:2px}
+.tile .c1,.tile .c2,.tile .c3{display:block;background:var(--noimg);overflow:hidden;min-height:0}
+.tile img{width:100%;height:100%;object-fit:cover;display:block}
+.tile b{display:block;font-size:.9375rem;line-height:1.25}
+.tile small{color:var(--muted);font-size:.75rem}

@@ -29,6 +29,7 @@
   }
   function num(v) { if (v === '' || v == null) return null; var n = parseFloat(String(v).replace(/[^\d.]/g, '')); return isFinite(n) ? n : null; }
   function fmt(n) { var frac = Math.abs(n % 1) > 0.004; return new Intl.NumberFormat('en', { minimumFractionDigits: frac ? 2 : 0, maximumFractionDigits: 2 }).format(n); }
+  function moneyR(n, c) { return n == null ? '' : (c ? c + ' ' : '') + new Intl.NumberFormat('en', { maximumFractionDigits: 0 }).format(Math.round(n)); }
   function money(n, c) { return n == null ? '' : (c ? c + ' ' : '') + fmt(n); }
   function pct(it) { return (it.price != null && it.was_price != null && it.was_price > it.price) ? Math.round((it.was_price - it.price) / it.was_price * 100) : 0; }
   // When a store blocks reading: guess the product name from the link, e.g. ".../100-leather-bomber-jacket-p06318252.html"
@@ -547,7 +548,7 @@
     var md = au.user_metadata || {};
     user = { id: au.id, email: au.email, name: md.name || md.full_name || md.given_name || (au.email || '').split('@')[0], currency: String(md.currency || '').toUpperCase() || defaultCurrency() };
     app.innerHTML = '<p class="boot loading" style="justify-content:center">Loading your stash…</p>';
-    var BCOLS = 'id,user_id,name,visibility,link_token,in_budget,budget,created_at';
+    var BCOLS = 'id,user_id,name,visibility,link_token,in_budget,budget,save_count,created_at';
     var res = await Promise.all([
       sb.from('boards').select(BCOLS).eq('user_id', au.id).order('created_at'),
       sb.from('profiles').select('username,name,currency').eq('id', au.id).maybeSingle(),
@@ -576,7 +577,7 @@
       var ins = await sb.from('boards').insert(seed).select(BCOLS);
       db.boards = ins.error ? [] : ins.data;
     }
-    loadNotes();
+    loadNotes(); await loadSaved();
     afterSignIn(msg);
     ensureUsername();
   }
@@ -1130,7 +1131,7 @@
     s.querySelector('#curSel').onchange = function (e) { user.currency = e.target.value; api.saveProfile(); getRates(user.currency).then(function () { if (!document.querySelector('.overlay')) renderHome(); }); renderHome(); toast('New items will use ' + user.currency); };
     s.querySelector('#mSetup').onclick = openSetup;
     var mp = s.querySelector('#mProfile'); if (mp) mp.onclick = function () { if (user.username) nav({ u: user.username }); else ensureUsername(); };
-    var mpe = s.querySelector('#mPeople'); if (mpe) mpe.onclick = openPeople;
+    var mpe = s.querySelector('#mPeople'); if (mpe) mpe.onclick = function () { nav({ explore: 1 }); };
     s.querySelector('#mOut').onclick = signOut;
     s.querySelector('#mDel').onclick = function () {
       askConfirm('Delete your account and everything in your stash? This can\'t be undone.', 'Delete account').then(function (ok) { if (ok) deleteAccount(); });
@@ -1277,6 +1278,7 @@
   function route() {
     closeSheet();
     var p = new URLSearchParams(location.search);
+    if (CLOUD && p.get('explore')) return renderExplore();
     if (CLOUD && p.get('u')) return renderProfile(p.get('u'));
     if (CLOUD && p.get('b')) return renderBoardPage(p.get('b'), p.get('k'));
     if (user) return renderHome();
@@ -1358,20 +1360,33 @@
     }
     var d = r.data, b = d.board, owner = d.owner || {}, items = d.items || [];
     document.title = b.name + ' · Stashd';
-    var toBuy = items.filter(function (i) { return !i.bought; });
+    var pub = b.visibility === 'public', canSave = pub && user && b.user_id !== user.id;
+    if (pub) { var sc = await sb.from('boards').select('save_count').eq('id', b.id).maybeSingle(); b.save_count = (sc.data && sc.data.save_count) || 0; }
+    function meta() {
+      return (owner.username ? '<button class="link" type="button" id="ownerLink">@' + esc(owner.username) + '</button>' : esc(owner.name || '')) +
+        ' · ' + items.length + ' item' + (items.length === 1 ? '' : 's') + (pub ? ' · <span id="saveCount">' + b.save_count + ' save' + (b.save_count === 1 ? '' : 's') + '</span>' : ' · ' + LOCK + ' by link');
+    }
     app.innerHTML = '<div class="home has-tabs">' + topbar() +
-      '<section class="bhead"><h1>' + esc(b.name) + '</h1>' +
-        '<p class="muted">' + (b.visibility === 'public' ? 'Public board' : LOCK + ' Shared by link') + ' · by ' +
-        (owner.username ? '<button class="link" type="button" id="ownerLink">@' + esc(owner.username) + '</button>' : esc(owner.name || '')) + '</p>' +
-        '<div class="row" style="margin-top:.8rem"><button class="btn" type="button" id="shareB">Share</button>' + (user ? '' : '<button class="btn primary" type="button" id="joinB">Make your own stash</button>') + '</div>' +
-      '</section>' +
-      '<div class="sum"><span class="muted">' + toBuy.length + ' to buy · ' + (items.length - toBuy.length) + ' bought</span><strong>' + esc(totals(toBuy, '')) + '</strong></div>' +
+      '<section class="bhead2"><div class="bt"><h2>' + esc(b.name) + '</h2></div><p class="muted small" id="bmeta">' + meta() + '</p>' +
+        '<div class="bact">' +
+          (canSave ? '<button class="btn ' + (savedIds.has(b.id) ? '' : 'primary') + ' small" type="button" id="saveB">' + (savedIds.has(b.id) ? '✓ Saved' : 'Save') + '</button>' : '') +
+          (!user ? '<button class="btn primary small" type="button" id="joinB">Sign up to save</button>' : '') +
+          '<button class="icon soft" type="button" id="shareB" aria-label="Share board">' + SHARE_SVG + '</button>' +
+        '</div></section>' +
       (items.length ? '<section class="grid">' + items.map(cardHtml).join('') + '</section>' : '<div class="empty"><p>Nothing in this board yet.</p></div>') +
     '</div>' + tabs;
     fin();
-    var ol = document.getElementById('ownerLink'); if (ol) ol.onclick = function () { nav({ u: owner.username }); };
+    function bindMeta() { var ol = document.getElementById('ownerLink'); if (ol) ol.onclick = function () { nav({ u: owner.username }); }; }
+    bindMeta();
     document.getElementById('shareB').onclick = function () { shareLink(location.href, b.name + ' on Stashd'); };
     var jb = document.getElementById('joinB'); if (jb) jb.onclick = function () { renderAuth('signup'); };
+    var svb = document.getElementById('saveB');
+    if (svb) svb.onclick = async function () {
+      svb.disabled = true; var on = await toggleSave(b); svb.disabled = false;
+      if (on === null) return;
+      svb.textContent = on ? '✓ Saved' : 'Save'; svb.classList.toggle('primary', !on);
+      document.getElementById('bmeta').innerHTML = meta(); bindMeta();
+    };
     app.querySelectorAll('.card').forEach(function (c) { c.onclick = function () { var it = items.find(function (i) { return i.id === c.dataset.id; }); if (it) openItemView(it); }; });
   }
 
@@ -1432,7 +1447,7 @@
   /* ---------- tab bar ---------- */
   function tabbarHtml(active) {
     function tab(id, label, icon) { return '<button class="tab" type="button" data-go="' + id + '"' + (active === id ? ' aria-current="page"' : '') + '>' + icon + '<span>' + label + '</span></button>'; }
-    return '<nav class="tabbar" aria-label="Main">' + tab('home', 'Stash', HOME_SVG) + (CLOUD ? tab('search', 'Search', SEARCH_SVG) : '') +
+    return '<nav class="tabbar" aria-label="Main">' + tab('home', 'Stash', HOME_SVG) + (CLOUD ? tab('explore', 'Explore', SEARCH_SVG) : '') +
       '<button class="tab add" type="button" data-go="add" aria-label="Add a link"><span class="plus">+</span></button>' +
       tab('profile', CLOUD ? 'Profile' : 'Account', avatar(user, 'sm')) + '</nav>';
   }
@@ -1442,7 +1457,7 @@
       b.onclick = function () {
         var g = b.dataset.go;
         if (g === 'home') { if (location.search) goHome(); else { ui.board = 'all'; renderHome(); window.scrollTo(0, 0); } }
-        else if (g === 'search') openPeople();
+        else if (g === 'explore') nav({ explore: 1 });
         else if (g === 'add') openAdd();
         else if (g === 'profile') { if (!CLOUD) openMenu(); else if (user.username) nav({ u: user.username }); else ensureUsername(); }
       };
@@ -1467,14 +1482,15 @@
 
     // Summary under the tabs: what's in this tab, in my currency.
     var notes = [], inTotals;
-    if (shB) { inTotals = tabItems; notes.push('Shared board, not in your own totals.'); }
+    if (shB) { inTotals = tabItems; notes.push('Not in your totals'); }
     else if (ownB) { inTotals = tabItems.filter(function (i) { return i.in_budget !== false; }); }
     else { inTotals = tabItems.filter(counts); }
     var skipped = tabItems.length - inTotals.length, hs = homeSum(inTotals);
-    if (skipped) notes.push(skipped + ' item' + (skipped === 1 ? '' : 's') + ' left out of the total.');
-    if (hs.missing) notes.push(hs.missing + ' item' + (hs.missing === 1 ? ' has' : 's have') + ' no ' + user.currency + ' price yet.');
-    if (ownB && ownB.in_budget === false && ui.board !== 'all') notes.push('This board isn\'t included in your totals under All.');
-    var sumLabel = ui.tab === 'bought' ? 'Spent' : 'To buy total', sumVal = money(hs.sum, user.currency), sumNote = notes.join(' ');
+    if (skipped) notes.push(skipped + ' excluded');
+    if (hs.missing) notes.push(hs.missing + ' without a ' + user.currency + ' price');
+    if (ownB && ownB.in_budget === false && ui.board !== 'all') notes.push('Not in your totals');
+    var sumLabel = ui.tab === 'bought' ? 'Spent' : 'To buy', sumVal = moneyR(hs.sum, user.currency), sumNote = notes.join(' · ');
+    var showSum = !(ownB && ownB.budget != null && ownB.budget !== '');   // the budget card already shows it
 
     app.innerHTML =
       '<div class="home has-tabs">' +
@@ -1491,7 +1507,7 @@
           '<button type="button" role="tab" data-tab="bought" aria-selected="' + (ui.tab === 'bought') + '">Bought · ' + bought.length + '</button>' +
         '</div>' +
         (CLOUD && localStashes().length ? '<div class="hint" style="margin:0 0 1rem">You have items from the test version saved on this device. <div class="row" style="margin-top:.6rem"><button class="btn primary" type="button" id="importBtn">Move them to my account</button><button class="btn" type="button" id="importNo">No thanks</button></div></div>' : '') +
-        '<div class="sum"><div><span class="muted">' + sumLabel + '</span>' + (sumNote ? '<small>' + esc(sumNote) + '</small>' : '') + '</div><strong>' + esc(sumVal) + '</strong></div>' +
+        (showSum ? '<div class="sum"><div><span class="muted">' + sumLabel + '</span>' + (sumNote ? '<small>' + esc(sumNote) + '</small>' : '') + '</div><strong>' + esc(sumVal) + '</strong></div>' : '') +
         (shB && cache[ui.board] === null ? '<p class="loading muted">Loading…</p>'
           : list.length ? '<section class="grid">' + list.map(cardHtml).join('') + '</section>'
           : cur ? '<div class="empty"><h2>' + (ui.tab === 'bought' ? 'Nothing bought here yet' : 'This board is empty') + '</h2>' + (ui.tab === 'bought' || (shB && shB.role !== 'editor') ? '' : '<p>Tap + to add something you love.</p>') + '</div>'
@@ -1515,22 +1531,21 @@
     var cur = user.currency;
     var counted = items.filter(function (i) { return i.in_budget !== false; });
     var spent = homeSum(counted.filter(function (i) { return i.bought; })).sum, toBuy = homeSum(counted.filter(function (i) { return !i.bought; })).sum;
-    if (b.budget == null || b.budget === '') return '<button class="budget empty" type="button" id="budgetBtn"><span>＋ Set a budget for this board</span><small>See what\'s left as you shop</small></button>';
-    // Left = budget − spent (bought) − to buy (still planned)
+    if (b.budget == null || b.budget === '') return '<button class="budget empty" type="button" id="budgetBtn">＋ Add a budget</button>';
+    // Left = budget − spent (bought) − planned (to buy)
     var B = +b.budget, left = B - spent - toBuy;
     var sp = B ? Math.min(100, spent / B * 100) : 100, tb = B ? Math.max(0, Math.min(100 - sp, toBuy / B * 100)) : 0;
-    return '<button class="budget" type="button" id="budgetBtn" aria-label="Edit budget">' +
-      '<span class="brow"><span>' + (left < 0 ? '<b class="over">' + esc(money(-left, cur)) + '</b> over' : '<b>' + esc(money(left, cur)) + '</b> left') + '</span><small>of ' + esc(money(B, cur)) + ' budget</small></span>' +
+    return '<button class="budget" type="button" id="budgetBtn" aria-label="Budget ' + esc(moneyR(B, cur)) + '. Edit budget">' +
+      '<span class="brow"><b' + (left < 0 ? ' class="over"' : '') + '>' + esc(moneyR(Math.abs(left), cur)) + '</b><span>' + (left < 0 ? 'over' : 'left') + '</span></span>' +
       '<span class="bar' + (left < 0 ? ' is-over' : '') + '" aria-hidden="true"><i style="width:' + sp.toFixed(1) + '%"></i><i class="tb" style="width:' + tb.toFixed(1) + '%"></i></span>' +
-      '<small class="blegend"><span class="dot sp"></span>Spent ' + esc(money(spent, cur)) + ' <span class="dot tb"></span>Planned (to buy) ' + esc(money(toBuy, cur)) + '</small>' +
-      '<small class="bhint">' + (left < 0 ? 'Your To buy list goes over this budget.' : 'Left after everything on your To buy list.') + '</small></button>';
+      '<small class="blegend"><span><span class="dot sp"></span>Spent ' + esc(moneyR(spent)) + '</span><span><span class="dot tb"></span>Planned ' + esc(moneyR(toBuy)) + '</span><span class="of">of ' + esc(moneyR(B)) + '</span></small></button>';
   }
   function boardHeaderHtml(b, own, items) {
     var n = items.length;
     var secret = CLOUD && b.visibility !== 'public';
     return '<section class="bhead2">' +
       '<div class="bt"><h2>' + esc(b.name) + '</h2>' + (secret ? '<span class="lockb" title="Private board">' + LOCK.replace(/12/g, '16') + '</span>' : '') + '</div>' +
-      '<p class="muted small">' + n + ' item' + (n === 1 ? '' : 's') + (own ? (secret ? ' · Private' : CLOUD ? ' · Public' : '') : ' · Shared by @' + esc((b.owner && b.owner.username) || '') + ' · ' + (b.role === 'editor' ? 'you can add' : 'view only')) + '</p>' +
+      '<p class="muted small">' + n + ' item' + (n === 1 ? '' : 's') + (own ? (secret ? ' · Private' : CLOUD ? ' · Public' + (b.save_count ? ' · ' + b.save_count + ' save' + (b.save_count === 1 ? '' : 's') : '') : '') : ' · Shared by @' + esc((b.owner && b.owner.username) || '') + ' · ' + (b.role === 'editor' ? 'you can add' : 'view only')) + '</p>' +
       '<div class="bact">' +
         (CLOUD ? '<button class="collab" type="button" id="collabBtn" aria-label="' + (own ? 'Invite collaborators' : 'See who\'s on this board') + '">' + stackHtml(b) + (own ? '<span class="av add">+</span>' : '') + '</button>' : '') +
         '<span class="grow"></span>' +
@@ -1783,7 +1798,12 @@
     var boards = q[3].data || [];
     var shared = me ? (db.shared || []) : boards.filter(function (b) { return b.visibility !== 'public' && user && sharedBoard(b.id); });   // secret boards I was invited to
     var mine = me ? boards : boards.filter(function (b) { return b.visibility === 'public'; });
-    var all = mine.concat(me ? shared : []), covers = {};
+    var savedBoards = [];
+    if (me) {
+      var sv = await sb.from('board_saves').select('created_at,b:boards(id,name,visibility,user_id,save_count)').eq('user_id', user.id).order('created_at', { ascending: false });
+      savedBoards = (sv.data || []).map(function (x) { return x.b; }).filter(function (b) { return b && b.visibility === 'public'; });
+    }
+    var all = mine.concat(me ? shared : [], savedBoards), covers = {};
     if (all.length) {
       var it = await sb.from('items').select('board_id,image_url,created_at').in('board_id', all.map(function (b) { return b.id; })).order('created_at', { ascending: false }).limit(1000);
       (it.data || []).forEach(function (i) { var c = covers[i.board_id] || (covers[i.board_id] = { n: 0, img: '' }); c.n++; if (!c.img && safeImg(i.image_url)) c.img = i.image_url; });
@@ -1800,8 +1820,9 @@
         '<h2 class="sec">' + (me ? 'Your boards' : 'Boards') + '</h2>' +
         (mine.length ? '<section class="boards">' + mine.map(function (b) { return boardCard(b, covers[b.id], me && b.visibility !== 'public' ? LOCK + ' Private' : ''); }).join('') + '</section>'
           : '<p class="muted">' + (me ? 'No boards yet.' : 'No public boards yet.') + '</p>') +
-        (me ? '<p class="muted small" style="margin-top:.6rem">Other people only see your public boards, plus secret ones you invited them to.</p>' : '') +
+        (me ? '<p class="muted small" style="margin-top:.6rem">Others see only your public boards.</p>' : '') +
         (shared.length ? '<h2 class="sec">Shared with you</h2><section class="boards">' + shared.map(function (b) { return boardCard(b, covers[b.id], PEOPLE_SVG.replace(/22/g, '12') + ' Shared'); }).join('') + '</section>' : '') +
+        (savedBoards.length ? '<h2 class="sec">Saved boards</h2><section class="boards">' + savedBoards.map(function (b) { return boardCard(b, covers[b.id], '♡ ' + (b.save_count || 0)); }).join('') + '</section>' : '') +
       '</div>' + tabs;
       bindTopbar(); if (user) bindTabbar();
       document.getElementById('fwers').onclick = function () { openFollowList(p, 'followers'); };
@@ -1821,6 +1842,85 @@
       var sb2 = document.getElementById('settingsBtn'); if (sb2) sb2.onclick = openMenu;
     }
     paint();
+  }
+
+  /* ---------- explore + saved boards ---------- */
+  var savedIds = new Set();
+  async function loadSaved() {
+    if (!CLOUD || !sb || !user) return;
+    var r = await sb.from('board_saves').select('board_id').eq('user_id', user.id);
+    savedIds = new Set((r.data || []).map(function (x) { return x.board_id; }));
+  }
+  async function toggleSave(b) {
+    if (!user) { renderAuth('signup'); return null; }
+    var on = savedIds.has(b.id);
+    var r = on ? await sb.from('board_saves').delete().eq('user_id', user.id).eq('board_id', b.id)
+      : await sb.from('board_saves').insert({ user_id: user.id, board_id: b.id });
+    if (r.error) { toast(friendly(r.error)); return null; }
+    if (on) { savedIds.delete(b.id); b.save_count = Math.max(0, (b.save_count || 0) - 1); }
+    else { savedIds.add(b.id); b.save_count = (b.save_count || 0) + 1; }
+    toast(on ? 'Removed from your saved boards' : 'Saved to your profile');
+    return !on;
+  }
+  // Up to 3 photos and the item count for each board
+  async function boardCovers(ids) {
+    var m = {};
+    if (!ids.length) return m;
+    var r = await sb.from('items').select('board_id,image_url,created_at').in('board_id', ids).order('created_at', { ascending: false }).limit(800);
+    (r.data || []).forEach(function (i) { var c = m[i.board_id] || (m[i.board_id] = { n: 0, imgs: [] }); c.n++; if (c.imgs.length < 3 && safeImg(i.image_url)) c.imgs.push(i.image_url); });
+    return m;
+  }
+  function tileHtml(b, c, owner) {
+    c = c || { n: 0, imgs: [] };
+    var im = function (u, cls) { return '<span class="' + cls + '">' + (u ? '<img src="' + esc(u) + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : '') + '</span>'; };
+    return '<button class="tile" type="button" data-bid="' + esc(b.id) + '"><span class="col">' + im(c.imgs[0], 'c1') + '<span class="col2">' + im(c.imgs[1], 'c2') + im(c.imgs[2], 'c3') + '</span></span>' +
+      '<b>' + esc(b.name) + '</b><small>' + (owner && owner.username ? '@' + esc(owner.username) + ' · ' : '') + c.n + ' item' + (c.n === 1 ? '' : 's') +
+      (b.save_count ? ' · ' + b.save_count + ' save' + (b.save_count === 1 ? '' : 's') : '') + '</small></button>';
+  }
+  async function renderExplore() {
+    document.title = 'Explore · Stashd';
+    app.innerHTML = '<div class="home has-tabs"><header class="top"><h1 class="wm">Explore</h1></header>' +
+      '<label class="field"><span class="sr">Search</span><input type="search" id="xq" placeholder="Search people and boards" autocapitalize="off" spellcheck="false" enterkeyhint="search"></label>' +
+      '<div id="xres"></div><h2 class="sec" id="xh">Popular boards</h2><section class="tiles" id="xpop"><p class="loading muted">Loading…</p></section></div>' + (user ? tabbarHtml('explore') : '');
+    if (user) bindTabbar();
+    var pop = document.getElementById('xpop');
+    // Search works straight away, before popular boards finish loading.
+    var q = document.getElementById('xq'), res = document.getElementById('xres'), tmr, seq = 0;
+    q.oninput = function () {
+      clearTimeout(tmr);
+      tmr = setTimeout(async function () {
+        var v = q.value.trim().replace(/^@/, '').replace(/[,()%*\\]/g, ''), my = ++seq;
+        if (v.length < 2) { res.innerHTML = ''; document.getElementById('xh').hidden = false; pop.hidden = false; return; }
+        var rr = await Promise.all([
+          sb.from('profiles').select('id,username,name').not('username', 'is', null).or('username.ilike.' + v.toLowerCase() + '%,name.ilike.%' + v + '%').limit(8),
+          sb.from('boards').select('id,name,user_id,save_count').eq('visibility', 'public').ilike('name', '%' + v + '%').order('save_count', { ascending: false }).limit(12)
+        ]);
+        if (my !== seq) return;
+        var people = (rr[0].data || []).filter(function (p) { return !user || p.id !== user.id; }), bs = rr[1].data || [];
+        res.innerHTML = (people.length ? '<h2 class="sec">People</h2><div class="people">' + people.map(function (p) { return personRow(p); }).join('') + '</div>' : '') +
+          (bs.length ? '<h2 class="sec">Boards</h2><div class="people">' + bs.map(function (b) {
+            return '<button class="person" type="button" data-bid="' + esc(b.id) + '"><span class="av">' + esc(b.name.charAt(0).toUpperCase()) + '</span><span><b>' + esc(b.name) + '</b><small>' + (b.save_count || 0) + ' saves</small></span></button>';
+          }).join('') + '</div>' : '') + (!people.length && !bs.length ? '<p class="muted">Nothing found for "' + esc(v) + '".</p>' : '');
+        document.getElementById('xh').hidden = true; pop.hidden = true;
+        bindPeople(res);
+        res.querySelectorAll('[data-bid]').forEach(function (x) { x.onclick = function () { nav({ b: x.dataset.bid }); }; });
+      }, 250);
+    };
+
+    var r = await sb.from('boards').select('id,name,user_id,save_count,created_at').eq('visibility', 'public').neq('user_id', user ? user.id : '00000000-0000-0000-0000-000000000000')
+      .order('save_count', { ascending: false }).order('created_at', { ascending: false }).limit(40);
+    var boards = r.data || [];
+    var covers = await boardCovers(boards.map(function (b) { return b.id; }));
+    boards = boards.filter(function (b) { return covers[b.id] && covers[b.id].n; });
+    var owners = {};
+    if (boards.length) {
+      var o = await sb.from('profiles').select('id,username,name').in('id', boards.map(function (b) { return b.user_id; }));
+      (o.data || []).forEach(function (p) { owners[p.id] = p; });
+    }
+    if (!document.body.contains(pop)) return;
+    pop.innerHTML = boards.length ? boards.map(function (b) { return tileHtml(b, covers[b.id], owners[b.user_id]); }).join('')
+      : '<p class="muted">No public boards yet. Make one of yours public to be the first!</p>';
+    pop.querySelectorAll('[data-bid]').forEach(function (x) { x.onclick = function () { nav({ b: x.dataset.bid }); }; });
   }
 
   /* ---------- start ---------- */
