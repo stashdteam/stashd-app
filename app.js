@@ -31,6 +31,20 @@
   function fmt(n) { return new Intl.NumberFormat('en', { maximumFractionDigits: 2 }).format(n); }
   function money(n, c) { return n == null ? '' : (c ? c + ' ' : '') + fmt(n); }
   function pct(it) { return (it.price != null && it.was_price != null && it.was_price > it.price) ? Math.round((it.was_price - it.price) / it.was_price * 100) : 0; }
+  // When a store blocks reading: guess the product name from the link, e.g. ".../100-leather-bomber-jacket-p06318252.html"
+  function titleFromUrl(url) {
+    try {
+      var segs = new URL(url).pathname.split('/').filter(Boolean).map(function (s) { return decodeURIComponent(s); });
+      var best = segs.map(function (s) { return s.replace(/\.(html?|aspx?|php)$/i, '').replace(/[-_]p?\d{5,}$/i, '').replace(/^p?\d{5,}[-_]/i, ''); })
+        .filter(function (s) { return /[a-z]/i.test(s) && s.split(/[-_]/).length >= 2 && !/^(en|ar|uk|us|eg|products?|collections?|shop|item|p)$/i.test(s) && !/^[a-z]{2}[-_][a-z]{2}$/i.test(s) && !/^productpage/i.test(s); })
+        .sort(function (a, b) { return b.length - a.length; })[0];
+      if (!best) return '';
+      var words = best.split(/[-_+]+/).filter(Boolean);
+      if (/^\d+$/.test(words[0]) && words[1] && /^(cotton|leather|linen|wool|silk|cashmere|polyester|viscose)$/i.test(words[1])) words[0] += '%';
+      var t = words.join(' ').toLowerCase();
+      return (t.charAt(0).toUpperCase() + t.slice(1)).slice(0, 120);
+    } catch (e) { return ''; }
+  }
   function hostBrand(url) { try { return new URL(url).hostname.replace(/^www\./, '').split('.')[0]; } catch (e) { return ''; } }
   function boardName(id) { var b = db.boards.find(function (x) { return x.id === id; }) || (db.shared || []).find(function (x) { return x.id === id; }); return b ? b.name : ''; }
   function persist() { return CLOUD ? true : save(KEY.data(user.id), db); }
@@ -718,9 +732,10 @@
     if (!document.body.contains(s)) return;
     ['title', 'brand', 'image_url', 'price', 'was_price', 'sold_out', 'sizes'].forEach(function (k) { if (info[k] != null && info[k] !== '') it[k] = info[k]; });
     if (info.currency) it.currency = String(info.currency).toUpperCase();
-    if (!it.title) it.title = '';
+    if (!it.title) it.title = titleFromUrl(url);
+    if (!info.ok && it.brand) it.brand = it.brand.charAt(0).toUpperCase() + it.brand.slice(1);
     var needsHelp = !info.ok || it.price == null;
-    var hint = info.blocked ? 'This store blocks automatic reading, so add the details below. Tip: the price is on the store page.'
+    var hint = info.blocked ? 'This store blocks automatic reading. We filled in what we could from the link. Add the price (and a photo if you like) below.'
       : !info.ok ? "Couldn't read this page automatically. Add the details below."
       : it.price == null ? 'Got the basics. Add the price below so it counts in your total.' : '';
 
